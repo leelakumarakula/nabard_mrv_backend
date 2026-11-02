@@ -1,0 +1,327 @@
+import hmac
+import uuid
+
+from fastapi import APIRouter, Depends, Header
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session
+
+from app.core.deps import CurrentUser, get_current_user, oauth2_scheme, require
+from app.core.errors import AppError, Conflict
+from app.core.security import generate_token, hash_token
+from app.db.mixins import utcnow
+from app.db.session import get_db
+from app.models import (
+    Device,
+    Farmer,
+    FarmPlot,
+    IntegrationFieldMapping,
+    IntegrationSource,
+    QuarantinedRecord,
+    SourceRecordMap,
+    SyncRun,
+)
+from app.schemas.common import Message, Page, PageParams, page_of, paginate
+from app.schemas.integration import (
+    BatchResultOut,
+    DiscardIn,
+    IdentityMapIn,
+    IdentityMapOut,
+    InboundBatch,
+    KeyOut,
+    MappingIn,
+    MappingOut,
+    PlotMapIn,
+    QuarantineOut,
+    ReplayIn,
+    SourceIn,
+    SourceOut,
+    SourceUpdate,
+    SyncRunOut,
+    TestPayloadIn,
+)
+from app.services import audit, crud
+from app.services.integration.adapters import TransientSourceError, get_adapter, with_retry
+from app.services.integration.pipeline import process_batch
+
+router = APIRouter(prefix="/integrations", tags=["integrations"])
+
+
+def _source(db: Session, source_code: str) -> IntegrationSource:
+    source = db.scalar(select(IntegrationSource).where(IntegrationSource.source_code == source_code))
+    if source is None:
+        raise AppError(404, "not_found", f"Integration source '{source_code}' not found")
+    return source
+
+
+def _source_out(db: Session, source: IntegrationSource) -> SourceOut:
+    last = db.scalar(select(SyncRun).where(SyncRun.source_id == source.id, SyncRun.trigger != "test")
+                     .order_by(SyncRun.started_at.desc()).limit(1))
+    open_q = db.scalar(select(func.count()).select_from(QuarantinedRecord).where(
+        QuarantinedRecord.source_id == source.id, QuarantinedRecord.status == "open")) or 0
+    if not source.enabled:
+        status = "disabled"
+    elif source.adapter_code == "unconfigured_rest":
+        status = "not_configured – awaiting source API specification"
+    elif source.is_mock:
+        status = "MOCK adapter – synthetic data, not a live integration"
+    elif source.source_type == "rest_push":
+        status = "awaiting inbound data" if last is None else "receiving"
+    else:
+        status = "configured"
+    return SourceOut.model_validate(source).model_copy(update={
+        "connection_status": status, "last_sync_at": last.started_at if last else None,
+        "last_sync_status": last.status if last else None, "open_quarantine": open_q})
+
+
+def inbound_actor(source_code: str, x_source_key: str | None = Header(None), token: str | None = Depends(oauth2_scheme),
+                  db: Session = Depends(get_db)) -> tuple[IntegrationSource, CurrentUser | None]:
+    """Inbound calls authenticate with the source's API key (X-Source-Key) or a user token with integration.manage."""
+    source = _source(db, source_code)
+    if not source.enabled:
+        raise AppError(403, "source_disabled", f"Source '{source_code}' is disabled")
+    if x_source_key:
+        if not source.inbound_key_hash or not hmac.compare_digest(source.inbound_key_hash, hash_token(x_source_key)):
+            raise AppError(401, "invalid_source_key", "Invalid source key")
+        return source, None
+    current = get_current_user(token, db)
+    current.require("integration.manage")
+    return source, current
+
+
+def _inbound(kind: str, body: InboundBatch, ctx: tuple, db: Session) -> BatchResultOut:
+    source, actor = ctx
+    run, outcomes = process_batch(db, source, kind, body.records, "push", actor)
+    db.commit()
+    return BatchResultOut(sync_run=SyncRunOut.model_validate(run), outcomes=outcomes)
+
+
+@router.post("/{source_code}/measurements", response_model=BatchResultOut)
+def receive_measurements(body: InboundBatch, ctx=Depends(inbound_actor), db: Session = Depends(get_db)):
+    """Receive monitoring measurements. Idempotent on (source, source_record_id)."""
+    return _inbound("measurements", body, ctx, db)
+
+
+@router.post("/{source_code}/observations", response_model=BatchResultOut)
+def receive_observations(body: InboundBatch, ctx=Depends(inbound_actor), db: Session = Depends(get_db)):
+    """Receive climate, soil, pest/disease or device observations."""
+    return _inbound("observations", body, ctx, db)
+
+
+@router.post("/{source_code}/advisories", response_model=BatchResultOut)
+def receive_advisories(body: InboundBatch, ctx=Depends(inbound_actor), db: Session = Depends(get_db)):
+    """Receive advisories with delivery and response information."""
+    return _inbound("advisories", body, ctx, db)
+
+
+@router.get("/sources", response_model=list[SourceOut])
+def list_sources(current: CurrentUser = Depends(require("integration.read")), db: Session = Depends(get_db)) -> list:
+    return [_source_out(db, s) for s in db.scalars(select(IntegrationSource).order_by(IntegrationSource.name))]
+
+
+@router.post("/sources", response_model=SourceOut, status_code=201)
+def create_source(body: SourceIn, current: CurrentUser = Depends(require("integration.manage")),
+                  db: Session = Depends(get_db)) -> SourceOut:
+    if body.adapter_code == "mock_water_meter" and not body.is_mock:
+        raise AppError(422, "mock_adapter", "Mock adapters must be flagged is_mock=true")
+    source = crud.create(db, current, IntegrationSource, body.model_dump(), "integration_source")
+    db.commit()
+    return _source_out(db, source)
+
+
+@router.get("/sources/{source_code}", response_model=SourceOut)
+def get_source(source_code: str, current: CurrentUser = Depends(require("integration.read")), db: Session = Depends(get_db)):
+    return _source_out(db, _source(db, source_code))
+
+
+@router.patch("/sources/{source_code}", response_model=SourceOut)
+def update_source(source_code: str, body: SourceUpdate, current: CurrentUser = Depends(require("integration.manage")),
+                  db: Session = Depends(get_db)) -> SourceOut:
+    source = crud.update(db, current, _source(db, source_code), body, "integration_source")
+    db.commit()
+    return _source_out(db, source)
+
+
+@router.post("/sources/{source_code}/rotate-key", response_model=KeyOut)
+def rotate_key(source_code: str, current: CurrentUser = Depends(require("integration.manage")),
+               db: Session = Depends(get_db)) -> KeyOut:
+    source = _source(db, source_code)
+    key = generate_token()
+    source.inbound_key_hash = hash_token(key)
+    source.inbound_key_hint = f"…{key[-4:]}"
+    audit.record(db, current, "rotate_key", "integration_source", source.id)
+    db.commit()
+    return KeyOut(source_code=source_code, inbound_key=key,
+                  message="Copy this key now and store it in the source system's secret store; it is not shown again.")
+
+
+@router.get("/sources/{source_code}/mappings", response_model=list[MappingOut])
+def list_mappings(source_code: str, current: CurrentUser = Depends(require("integration.read")),
+                  db: Session = Depends(get_db)) -> list:
+    source = _source(db, source_code)
+    return list(db.scalars(select(IntegrationFieldMapping).where(IntegrationFieldMapping.source_id == source.id)
+                           .order_by(IntegrationFieldMapping.payload_kind, IntegrationFieldMapping.source_field)))
+
+
+@router.post("/sources/{source_code}/mappings", response_model=MappingOut, status_code=201)
+def add_mapping(source_code: str, body: MappingIn, current: CurrentUser = Depends(require("integration.manage")),
+                db: Session = Depends(get_db)) -> IntegrationFieldMapping:
+    source = _source(db, source_code)
+    obj = crud.create(db, current, IntegrationFieldMapping, {**body.model_dump(), "source_id": source.id}, "integration_mapping")
+    db.commit()
+    return obj
+
+
+@router.delete("/mappings/{mapping_id}", response_model=Message)
+def delete_mapping(mapping_id: uuid.UUID, current: CurrentUser = Depends(require("integration.manage")),
+                   db: Session = Depends(get_db)) -> Message:
+    mapping = crud.get_or_404(db, IntegrationFieldMapping, mapping_id, "Mapping")
+    audit.record(db, current, "delete", "integration_mapping", mapping.id, before=audit.snapshot(mapping))
+    db.delete(mapping)
+    db.commit()
+    return Message(message="Mapping removed")
+
+
+IDENTITY_MODELS = {"farm_plot": FarmPlot, "farmer": Farmer, "device": Device}
+
+
+def _add_identity_map(db: Session, current: CurrentUser, source: IntegrationSource, body: IdentityMapIn) -> SourceRecordMap:
+    crud.get_or_404(db, IDENTITY_MODELS[body.entity_type], body.internal_id, body.entity_type.replace("_", " ").title())
+    existing = db.scalar(select(SourceRecordMap).where(SourceRecordMap.source_id == source.id,
+                                                       SourceRecordMap.entity_type == body.entity_type,
+                                                       SourceRecordMap.source_record_id == body.source_id))
+    if existing:
+        raise Conflict(f"Source {body.entity_type} '{body.source_id}' is already mapped")
+    mapping = SourceRecordMap(source_id=source.id, entity_type=body.entity_type, source_record_id=body.source_id,
+                              internal_record_id=body.internal_id, mapped_by_id=current.id, review_note=body.review_note)
+    db.add(mapping)
+    audit.record(db, current, "map_identity", "integration_source", source.id,
+                 after={"entity_type": body.entity_type, "source_id": body.source_id, "internal_id": body.internal_id})
+    return mapping
+
+
+@router.get("/sources/{source_code}/identity-maps", response_model=list[IdentityMapOut])
+def list_identity_maps(source_code: str, current: CurrentUser = Depends(require("integration.read")),
+                       db: Session = Depends(get_db)) -> list:
+    source = _source(db, source_code)
+    return list(db.scalars(select(SourceRecordMap).where(SourceRecordMap.source_id == source.id,
+                                                         SourceRecordMap.entity_type.in_(list(IDENTITY_MODELS)))
+                           .order_by(SourceRecordMap.entity_type, SourceRecordMap.source_record_id)))
+
+
+@router.post("/sources/{source_code}/identity-maps", response_model=IdentityMapOut, status_code=201)
+def map_identity(source_code: str, body: IdentityMapIn, current: CurrentUser = Depends(require("integration.manage")),
+                 db: Session = Depends(get_db)) -> SourceRecordMap:
+    """Reviewed mapping of a source system's farmer/plot/device identifier to the platform record."""
+    mapping = _add_identity_map(db, current, _source(db, source_code), body)
+    db.commit()
+    return mapping
+
+
+@router.post("/sources/{source_code}/plot-maps", response_model=Message, status_code=201)
+def map_plot(source_code: str, body: PlotMapIn, current: CurrentUser = Depends(require("integration.manage")),
+             db: Session = Depends(get_db)) -> Message:
+    """Shortcut for a plot identity map."""
+    _add_identity_map(db, current, _source(db, source_code),
+                      IdentityMapIn(entity_type="farm_plot", source_id=body.source_plot_id, internal_id=body.farm_plot_id))
+    db.commit()
+    return Message(message=f"Mapped source plot '{body.source_plot_id}'")
+
+
+@router.post("/{source_code}/pull", response_model=BatchResultOut)
+def pull(source_code: str, current: CurrentUser = Depends(require("integration.manage")), db: Session = Depends(get_db)):
+    """Run a pull synchronisation through the source's adapter (pagination, retry with backoff)."""
+    source = _source(db, source_code)
+    if not source.enabled:
+        raise AppError(403, "source_disabled", f"Source '{source_code}' is disabled")
+    adapter = get_adapter(db, source)
+    cursor = (source.config or {}).get("cursor")
+    records: list[dict] = []
+    pages = 0
+    try:
+        while True:
+            page = with_retry(lambda c=cursor: adapter.fetch_page(c), attempts=int((source.config or {}).get("retries", 3)),
+                              base_delay=0.05)
+            records.extend(page.records)
+            pages += 1
+            if page.next_cursor is None or pages >= int((source.config or {}).get("max_pages", 50)):
+                break
+            cursor = page.next_cursor
+    except TransientSourceError as exc:
+        raise AppError(502, "source_unavailable", f"Source unavailable after retries: {exc}") from exc
+    run, outcomes = process_batch(db, source, adapter.payload_kind, records, "pull", current)
+    run.cursor = f"pages={pages}"
+    db.commit()
+    return BatchResultOut(sync_run=SyncRunOut.model_validate(run), outcomes=outcomes)
+
+
+@router.post("/{source_code}/test-payload", response_model=BatchResultOut)
+def test_payload(source_code: str, body: TestPayloadIn, current: CurrentUser = Depends(require("integration.manage")),
+                 db: Session = Depends(get_db)):
+    """Dry run: map and validate sample records without saving them."""
+    source = _source(db, source_code)
+    run, outcomes = process_batch(db, source, body.payload_kind, body.records, "test", current, dry_run=True)
+    db.commit()
+    return BatchResultOut(sync_run=SyncRunOut.model_validate(run), outcomes=outcomes)
+
+
+@router.get("/{source_code}/sync-runs", response_model=Page[SyncRunOut])
+def sync_runs(source_code: str, params: PageParams = Depends(), current: CurrentUser = Depends(require("integration.read")),
+              db: Session = Depends(get_db)) -> dict:
+    source = _source(db, source_code)
+    stmt = select(SyncRun).where(SyncRun.source_id == source.id).order_by(SyncRun.started_at.desc())
+    return page_of(*paginate(db, stmt, params, unique=False), params, SyncRunOut)
+
+
+@router.get("/sync-runs/{run_id}/quarantine", response_model=list[QuarantineOut])
+def run_quarantine(run_id: uuid.UUID, current: CurrentUser = Depends(require("integration.read")),
+                   db: Session = Depends(get_db)) -> list:
+    return list(db.scalars(select(QuarantinedRecord).where(QuarantinedRecord.sync_run_id == run_id)
+                           .order_by(QuarantinedRecord.created_at)))
+
+
+@router.get("/quarantine", response_model=Page[QuarantineOut])
+def list_quarantine(params: PageParams = Depends(), status: str | None = "open", source_code: str | None = None,
+                    current: CurrentUser = Depends(require("integration.read")), db: Session = Depends(get_db)) -> dict:
+    stmt = select(QuarantinedRecord).order_by(QuarantinedRecord.created_at.desc())
+    if status:
+        stmt = stmt.where(QuarantinedRecord.status == status)
+    if source_code:
+        stmt = stmt.where(QuarantinedRecord.source_id == _source(db, source_code).id)
+    return page_of(*paginate(db, stmt, params, unique=False), params, QuarantineOut)
+
+
+@router.post("/{source_code}/replay", response_model=BatchResultOut)
+def replay(source_code: str, body: ReplayIn, current: CurrentUser = Depends(require("integration.replay")),
+           db: Session = Depends(get_db)):
+    """Reprocess open quarantined records (e.g. after fixing a mapping or adding a plot map)."""
+    source = _source(db, source_code)
+    stmt = select(QuarantinedRecord).where(QuarantinedRecord.source_id == source.id, QuarantinedRecord.status == "open")
+    if body.quarantine_ids:
+        stmt = stmt.where(QuarantinedRecord.id.in_(body.quarantine_ids))
+    elif body.sync_run_id:
+        stmt = stmt.where(QuarantinedRecord.sync_run_id == body.sync_run_id)
+    else:
+        raise AppError(422, "selection_required", "Select quarantined records or a sync run to replay")
+    items = list(db.scalars(stmt.order_by(QuarantinedRecord.created_at)))
+    if not items:
+        raise AppError(422, "nothing_to_replay", "No open quarantined records match the selection")
+    kinds = {q.payload_kind for q in items}
+    if len(kinds) > 1:
+        raise AppError(422, "mixed_kinds", "Replay records of one payload kind at a time")
+    original = db.get(SyncRun, items[0].sync_run_id)
+    run, outcomes = process_batch(db, source, kinds.pop(), [q.payload for q in items], "replay", current,
+                                  replay_of=original, quarantined=items)
+    db.commit()
+    return BatchResultOut(sync_run=SyncRunOut.model_validate(run), outcomes=outcomes)
+
+
+@router.post("/quarantine/{quarantine_id}/discard", response_model=QuarantineOut)
+def discard(quarantine_id: uuid.UUID, body: DiscardIn, current: CurrentUser = Depends(require("integration.replay")),
+            db: Session = Depends(get_db)) -> QuarantinedRecord:
+    item = crud.get_or_404(db, QuarantinedRecord, quarantine_id, "Quarantined record")
+    if item.status != "open":
+        raise Conflict(f"Record is already {item.status}")
+    item.status, item.resolution_note, item.resolved_at, item.resolved_by_id = "discarded", body.note, utcnow(), current.id
+    audit.record(db, current, "discard", "quarantined_record", item.id, summary=body.note)
+    db.commit()
+    return item

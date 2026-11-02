@@ -1,0 +1,30 @@
+from fastapi import APIRouter
+
+from app.api.v1 import (
+    admin,
+    advisories,
+    auth,
+    community,
+    configuration,
+    dashboard,
+    devices,
+    evidence,
+    geography,
+    health,
+    indicators,
+    integrations,
+    me,
+    monitoring,
+    mrv,
+    organisations,
+    programmes,
+    registry,
+    reports,
+    verification,
+    workstreams,
+)
+
+api_router = APIRouter()
+for module in (health, auth, admin, dashboard, programmes, geography, organisations, registry, workstreams, devices,
+               advisories, community, configuration, indicators, monitoring, evidence, mrv, verification, integrations, reports, me):
+    api_router.include_router(module.router)

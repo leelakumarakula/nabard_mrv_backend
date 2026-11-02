@@ -1,0 +1,10 @@
+line-length = 140
+target-version = "py313"
+extend-exclude = ["alembic/versions"]
+
+[lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = ["B008", "UP046", "UP047"]  # FastAPI dependencies as defaults; keep TypeVar generics for pydantic
+
+[lint.per-file-ignores]
+"tests/conftest.py" = ["E402"]
