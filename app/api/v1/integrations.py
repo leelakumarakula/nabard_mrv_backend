@@ -40,7 +40,13 @@ from app.schemas.integration import (
     TestPayloadIn,
 )
 from app.services import audit, crud
-from app.services.integration.adapters import TransientSourceError, get_adapter, with_retry
+from app.services.integration.adapters import (
+    TransientSourceError,
+    catalogue,
+    get_adapter,
+    requires_mock_flag,
+    with_retry,
+)
 from app.services.integration.pipeline import process_batch
 
 router = APIRouter(prefix="/integrations", tags=["integrations"])
@@ -64,6 +70,8 @@ def _source_out(db: Session, source: IntegrationSource) -> SourceOut:
         status = "not_configured – awaiting source API specification"
     elif source.is_mock:
         status = "MOCK adapter – synthetic data, not a live integration"
+    elif requires_mock_flag(source.adapter_code) is False:
+        status = "LIVE public data service (no key) – runs when you pull"
     elif source.source_type == "rest_push":
         status = "awaiting inbound data" if last is None else "receiving"
     else:
@@ -114,6 +122,23 @@ def receive_advisories(body: InboundBatch, ctx=Depends(inbound_actor), db: Sessi
     return _inbound("advisories", body, ctx, db)
 
 
+def _check_mock_flag(adapter_code: str, is_mock: bool) -> None:
+    """Synthetic adapters must be labelled mock and real-data adapters must not be, so data is never mislabelled."""
+    required = requires_mock_flag(adapter_code)
+    if required is True and not is_mock:
+        raise AppError(422, "mock_adapter", f"Adapter '{adapter_code}' generates synthetic data; the source must be "
+                                            "flagged is_mock=true")
+    if required is False and is_mock:
+        raise AppError(422, "mock_adapter", f"Adapter '{adapter_code}' fetches real data; the source must not be "
+                                            "flagged is_mock")
+
+
+@router.get("/catalogue")
+def adapter_catalogue(current: CurrentUser = Depends(require("integration.read"))) -> list[dict]:
+    """Ready-made pull adapters an operator can register: real public-data services and labelled samples."""
+    return catalogue()
+
+
 @router.get("/sources", response_model=list[SourceOut])
 def list_sources(current: CurrentUser = Depends(require("integration.read")), db: Session = Depends(get_db)) -> list:
     return [_source_out(db, s) for s in db.scalars(select(IntegrationSource).order_by(IntegrationSource.name))]
@@ -122,8 +147,7 @@ def list_sources(current: CurrentUser = Depends(require("integration.read")), db
 @router.post("/sources", response_model=SourceOut, status_code=201)
 def create_source(body: SourceIn, current: CurrentUser = Depends(require("integration.manage")),
                   db: Session = Depends(get_db)) -> SourceOut:
-    if body.adapter_code == "mock_water_meter" and not body.is_mock:
-        raise AppError(422, "mock_adapter", "Mock adapters must be flagged is_mock=true")
+    _check_mock_flag(body.adapter_code, body.is_mock)
     source = crud.create(db, current, IntegrationSource, body.model_dump(), "integration_source")
     db.commit()
     return _source_out(db, source)
@@ -137,7 +161,10 @@ def get_source(source_code: str, current: CurrentUser = Depends(require("integra
 @router.patch("/sources/{source_code}", response_model=SourceOut)
 def update_source(source_code: str, body: SourceUpdate, current: CurrentUser = Depends(require("integration.manage")),
                   db: Session = Depends(get_db)) -> SourceOut:
-    source = crud.update(db, current, _source(db, source_code), body, "integration_source")
+    source = _source(db, source_code)
+    if body.adapter_code is not None:
+        _check_mock_flag(body.adapter_code, source.is_mock)
+    source = crud.update(db, current, source, body, "integration_source")
     db.commit()
     return _source_out(db, source)
 

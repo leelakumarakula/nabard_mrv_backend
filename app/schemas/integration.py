@@ -7,6 +7,9 @@ from pydantic import BaseModel, Field
 from app.schemas.common import ORMModel
 
 PayloadKind = Literal["measurements", "observations", "advisories"]
+AdapterCode = Literal["push_only", "unconfigured_rest", "mock_water_meter", "mock_iot_gateway", "open_meteo_weather",
+                      "nasa_power_weather", "sentinel2_ndvi", "sample_climate_engine", "sample_pest_engine",
+                      "sample_water_engine", "sample_iot_gateway"]
 
 
 class SourceIn(BaseModel):
@@ -14,7 +17,7 @@ class SourceIn(BaseModel):
     name: str
     module_code: str | None = None
     source_type: Literal["rest_push", "rest_pull", "file_exchange"]
-    adapter_code: Literal["push_only", "mock_water_meter", "mock_iot_gateway", "unconfigured_rest"] = "push_only"
+    adapter_code: AdapterCode = "push_only"
     base_url_env_var: str | None = Field(default=None, pattern=r"^[A-Z0-9_]+$")
     auth_type: Literal["api_key", "oauth2", "basic", "none"] = "api_key"
     owner: str | None = None
@@ -27,7 +30,7 @@ class SourceIn(BaseModel):
 class SourceUpdate(BaseModel):
     name: str | None = None
     module_code: str | None = None
-    adapter_code: Literal["push_only", "mock_water_meter", "mock_iot_gateway", "unconfigured_rest"] | None = None
+    adapter_code: AdapterCode | None = None
     base_url_env_var: str | None = Field(default=None, pattern=r"^[A-Z0-9_]+$")
     auth_type: Literal["api_key", "oauth2", "basic", "none"] | None = None
     owner: str | None = None

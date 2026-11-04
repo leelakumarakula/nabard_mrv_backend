@@ -3,11 +3,16 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.schemas.common import ORMModel, Ref
 
 ScopeType = Literal["programme", "state", "district", "cluster", "fpo", "farmer", "plot"]
+
+
+def _empty_object(value: Any) -> Any:
+    """An empty JSON box in a form arrives as null; store it as an empty object (the columns are NOT NULL)."""
+    return {} if value is None else value
 
 
 class IndicatorIn(BaseModel):
@@ -36,6 +41,8 @@ class IndicatorIn(BaseModel):
     verification_sample_approach: str | None = None
     approval_note: str | None = None
 
+    _no_null_objects = field_validator("method_parameters", "validation_rules", mode="before")(_empty_object)
+
 
 class IndicatorUpdate(BaseModel):
     name: str | None = None
@@ -60,6 +67,8 @@ class IndicatorUpdate(BaseModel):
     exclusions: str | None = None
     verification_sample_approach: str | None = None
     approval_note: str | None = None
+
+    _no_null_objects = field_validator("method_parameters", "validation_rules", mode="before")(_empty_object)
 
 
 class IndicatorStatusIn(BaseModel):

@@ -1,42 +1,32 @@
-"""Pull adapters. Only clearly labelled mock adapters exist until source API documentation is supplied."""
+"""Pull adapter registry.
+
+* Mock adapters (mock_*) and sample adapters (sample_*) generate synthetic data and must be flagged is_mock.
+* Public-data adapters (Open-Meteo, NASA POWER, Sentinel-2) fetch real data from free services that need no key.
+* FarmFuture engines stay ``unconfigured_rest`` until their API documentation is supplied.
+"""
 
 import os
-import random
-import time
-from collections.abc import Callable
-from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, TypeVar
+from typing import Any
 
 from sqlalchemy import select, true
 from sqlalchemy.orm import Session
 
 from app.core.errors import AppError
 from app.models import Device, FarmPlot, IntegrationSource, Programme
+from app.services.integration.base import PageResult, TransientSourceError, with_retry
+from app.services.integration.platform_adapters import (
+    NasaPowerAdapter,
+    OpenMeteoAdapter,
+    SampleClimateEngineAdapter,
+    SampleIotGatewayAdapter,
+    SamplePestEngineAdapter,
+    SampleWaterEngineAdapter,
+    Sentinel2NdviAdapter,
+)
 
-T = TypeVar("T")
-
-
-class TransientSourceError(Exception):
-    """Temporary failure (timeout, 5xx, rate limit) – safe to retry."""
-
-
-@dataclass
-class PageResult:
-    records: list[dict[str, Any]]
-    next_cursor: str | None
-
-
-def with_retry(fn: Callable[[], T], attempts: int = 3, base_delay: float = 0.2) -> T:
-    """Retry transient failures with exponential backoff and jitter."""
-    for attempt in range(1, attempts + 1):
-        try:
-            return fn()
-        except TransientSourceError:
-            if attempt == attempts:
-                raise
-            time.sleep(base_delay * (2 ** (attempt - 1)) + random.uniform(0, base_delay / 2))
-    raise AssertionError("unreachable")
+__all__ = ["ADAPTERS", "PageResult", "TransientSourceError", "catalogue", "get_adapter", "requires_mock_flag",
+           "uses_platform_codes", "with_retry"]
 
 
 class MockWaterMeterAdapter:
@@ -135,12 +125,43 @@ class UnconfiguredRestAdapter:
                        "specification has not been supplied – requires source-system owner confirmation.")
 
 
-ADAPTERS: dict[str, type] = {
+ADAPTERS: dict[str, type | None] = {
     "mock_water_meter": MockWaterMeterAdapter,
     "mock_iot_gateway": MockIotGatewayAdapter,
     "push_only": None,  # sources that push to the MRV inbound endpoints
     "unconfigured_rest": UnconfiguredRestAdapter,
+    "open_meteo_weather": OpenMeteoAdapter,
+    "nasa_power_weather": NasaPowerAdapter,
+    "sentinel2_ndvi": Sentinel2NdviAdapter,
+    "sample_climate_engine": SampleClimateEngineAdapter,
+    "sample_pest_engine": SamplePestEngineAdapter,
+    "sample_water_engine": SampleWaterEngineAdapter,
+    "sample_iot_gateway": SampleIotGatewayAdapter,
 }
+SYNTHETIC_ADAPTERS = {"mock_water_meter", "mock_iot_gateway", "sample_climate_engine", "sample_pest_engine",
+                      "sample_water_engine", "sample_iot_gateway"}
+PUBLIC_DATA_ADAPTERS = {"open_meteo_weather", "nasa_power_weather", "sentinel2_ndvi"}
+
+
+def requires_mock_flag(adapter_code: str) -> bool | None:
+    """True when the adapter's data is synthetic (source must be is_mock), False when it is real data (must not be),
+    None when the flag is the operator's choice."""
+    if adapter_code in SYNTHETIC_ADAPTERS:
+        return True
+    if adapter_code in PUBLIC_DATA_ADAPTERS:
+        return False
+    return None
+
+
+def uses_platform_codes(adapter_code: str) -> bool:
+    """Adapters that read the platform's own plots/devices refer to them by platform code; no identity map is needed."""
+    return bool(getattr(ADAPTERS.get(adapter_code), "uses_platform_codes", False))
+
+
+def catalogue() -> list[dict[str, Any]]:
+    """Adapters an operator can register from the integration screen, with the defaults they need."""
+    return [{"adapter_code": code, **cls.catalogue, "is_mock": code in SYNTHETIC_ADAPTERS}
+            for code, cls in ADAPTERS.items() if cls is not None and hasattr(cls, "catalogue")]
 
 
 def get_adapter(db: Session, source: IntegrationSource):

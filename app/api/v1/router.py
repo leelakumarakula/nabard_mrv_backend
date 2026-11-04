@@ -17,6 +17,7 @@ from app.api.v1 import (
     monitoring,
     mrv,
     organisations,
+    plot_map,
     programmes,
     registry,
     reports,
@@ -26,5 +27,6 @@ from app.api.v1 import (
 
 api_router = APIRouter()
 for module in (health, auth, admin, dashboard, programmes, geography, organisations, registry, workstreams, devices,
-               advisories, community, configuration, indicators, monitoring, evidence, mrv, verification, integrations, reports, me):
+               advisories, community, configuration, indicators, monitoring, evidence, mrv, verification, integrations,
+               plot_map, reports, me):
     api_router.include_router(module.router)

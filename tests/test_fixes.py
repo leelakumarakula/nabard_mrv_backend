@@ -300,3 +300,16 @@ def test_outcome_indicators_are_pending_and_not_calculable(api, db, programme_id
         r = analyst.post("/mrv/calculations", json={"indicator_id": indicator["id"], "programme_id": str(programme_id),
                                                     "period_start": "2026-10-01", "period_end": "2026-12-31"})
         assert r.status_code == 422 and "no supported calculation method" in r.json()["error"]["message"]
+
+
+# -- Empty JSON boxes in the indicator form ----------------------------------------------------------------------------
+def test_indicator_accepts_empty_json_boxes(api, db) -> None:
+    pa = api.as_("programme_admin")
+    r = pa.post("/indicators", json={"code": "T_EMPTY_JSON", "name": "x", "family": "outcome", "unit": "households",
+                                     "definition": "x", "method_code": "households_adopting",
+                                     "method_parameters": None, "validation_rules": None})
+    assert r.status_code == 201, r.text
+    assert r.json()["method_parameters"] == {} and r.json()["validation_rules"] == {}
+    r = pa.patch(f"/indicators/{r.json()['id']}", json={"method_parameters": None, "validation_rules": None})
+    assert r.status_code == 200, r.text
+    assert r.json()["method_parameters"] == {}

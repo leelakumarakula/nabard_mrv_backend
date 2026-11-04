@@ -69,6 +69,25 @@ rebuilds and reseeds – so never point `TEST_DATABASE_URL` at a database you wa
 `APP_ENV` defaults to `production`. Development conveniences (password-reset token in the API response, loading demo
 data) work only when `APP_ENV` is explicitly `local`, `development` or `test`.
 
+## Data connectors and the farm map
+
+Integrations → *Ready-made connectors* registers a pull source in one step (pick the programme it files records under):
+
+| Connector | Data | Creates |
+|---|---|---|
+| `open_meteo_weather` | REAL – Open-Meteo, free, no key | `weather_estimate` (past days) and `weather_forecast` per located plot |
+| `nasa_power_weather` | REAL – NASA POWER, free, no key | `weather_estimate` per located plot (a few days' delay) |
+| `sentinel2_ndvi` | REAL – Sentinel-2 via Microsoft Planetary Computer, free, no key | `vegetation_index` (NDVI) from the latest cloud-free scene |
+| `sample_climate_engine`, `sample_pest_engine`, `sample_water_engine` | SAMPLE – synthetic stand-ins for the FarmFuture engines | risk estimates / water-balance outputs, flagged DEMO |
+| `sample_iot_gateway` | SAMPLE – synthetic readings for every active registered device | `sensor_observation`, flagged DEMO |
+
+Nothing is fetched until someone clicks **Run pull** on the source. Located plot = a plot with latitude/longitude whose
+farmer is enrolled in the programme. These are not IMD data; IMD and the FarmFuture APIs need agreements and API
+documentation first. The **Farm map** (`/map`, API `GET /api/v1/map/plots`) shows located plots with the latest values;
+without `farmer.read_pii` points are rounded to about 1 km. Outbound HTTPS to `api.open-meteo.com`,
+`power.larc.nasa.gov` and `planetarycomputer.microsoft.com` (and map tiles from `tile.openstreetmap.org` in the browser)
+must be allowed where the platform is hosted.
+
 ## Layout
 
 ```

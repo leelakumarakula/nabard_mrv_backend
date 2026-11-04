@@ -32,6 +32,7 @@ from app.models import (
     SyncRun,
 )
 from app.services import audit, record_types
+from app.services.integration.adapters import uses_platform_codes
 from app.services.integration.canonical import (
     PAYLOAD_SCHEMAS,
     CanonicalAdvisory,
@@ -93,7 +94,9 @@ class Processor:
         self.source = source
         self.actor = actor
         self._programmes: dict[str, Programme | None] = {}
-        self.exact_code_matching = bool(get_setting(db, "integration.allow_exact_code_matching"))
+        # Adapters that read the platform's own plots/devices send platform codes, so exact matching is safe for them.
+        self.exact_code_matching = (bool(get_setting(db, "integration.allow_exact_code_matching"))
+                                    or uses_platform_codes(source.adapter_code))
         self.received_at = utcnow()
 
     # -- reference resolution -------------------------------------------------------------------------------------

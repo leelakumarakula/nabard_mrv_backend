@@ -28,10 +28,13 @@ Legend: **Implemented** – working and tested · **Configurable** – working; 
 | Reporting | Official NABARD CCF-ID template | Awaiting approval | Template registered as *awaiting official template* |
 | Reporting | Endline / impact assessment | Awaiting approval | Disabled until methodology approved |
 | Integrations | Adapters, mappings, identity maps, quarantine, replay, mock adapters | Implemented | |
-| Integrations | Live FarmFuture / IMD / satellite / IoT feeds | Awaiting approval | No live data until contracts and access are confirmed |
+| Integrations | Real public data: Open-Meteo weather + forecast, NASA POWER weather, Sentinel-2 NDVI (Planetary Computer) | Implemented | Free services, no key; gridded estimates and forecasts are labelled as such – not station or IMD data |
+| Integrations | SAMPLE connectors standing in for the FarmFuture Climate, Pest and Water engines and the IoT gateway | Implemented | Synthetic data, source must be is_mock, records flagged DEMO; replace when the APIs are supplied |
+| Integrations | Live FarmFuture / IMD / IoT feeds | Awaiting approval | No live data until contracts and access are confirmed |
 | Platform | Data-consistency checker (`python -m app.services.integrity`) | Implemented | 12 read-only checks; run before reporting |
 | Platform | Sign-in lockout, upload virus scanning, outbound SMS/email | Not started | Lockout awaits a policy decision |
-| Platform | Offline field mode, maps / geospatial layers | Not started | Needs confirmed requirements and licensed datasets |
+| Platform | Farm map (OpenStreetMap): located plots coloured by practice progress, risk, NDVI or forecast rain | Implemented | Points rounded to ~1 km without farmer.read_pii; no plot boundaries or licensed layers yet |
+| Platform | Offline field mode, plot boundaries / licensed geospatial layers | Not started | Needs confirmed requirements and licensed datasets |
 
 ## Pending programme-owner decisions
 
@@ -49,7 +52,7 @@ Legend: **Implemented** – working and tested · **Configurable** – working; 
 | ENDLINE_METHOD | Endline / impact methodology | Endline report disabled |
 | FARMFUTURE_APIS | FarmFuture capabilities, owners, API contracts | Placeholder sources; mock adapters labelled MOCK |
 | IOT_SCHEDULE | Device models, quantities, protocols | Provisional device capability map; mock gateway |
-| DATA_LICENCES | IMD, satellite, Coffee Board, state, KVK access | Not connected |
+| DATA_LICENCES | IMD, satellite, Coffee Board, state, KVK access | IMD, Coffee Board, state, KVK not connected; free Open-Meteo, NASA POWER and Sentinel-2 connectors available |
 | PRIVACY_RETENTION | Consent, data-sharing and retention rules | Consent per farmer; role-based masking; retention not configured |
 | LOGIN_LOCKOUT | Sign-in lockout / throttling policy (raised by the functional audit) | Failed sign-ins audited; no lockout yet |
 | FPO_REGISTRATION_GEOGRAPHY | Must an FPO-registered farmer lie within the FPO's area? (raised by the functional audit) | Allowed when the farmer's primary FPO is the coordinator's |
