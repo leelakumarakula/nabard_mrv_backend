@@ -35,7 +35,8 @@ def test_latest_programme_is_primary_with_proposed_versioned_targets(api, db, pr
     pa = api.as_("programme_admin")
     programmes = pa.get("/programmes").json()["items"]
     assert programmes[0]["code"] == "CCRL-INCLUSIVE" and programmes[0]["duration_months"] == 36
-    targets = {t["metric_code"]: t for t in pa.get(f"/programmes/{programme_id}/targets").json()}
+    # Programme-wide figures (state-wise figures from proposal §5.1 are checked in test_fixes.py)
+    targets = {t["metric_code"]: t for t in pa.get(f"/programmes/{programme_id}/targets").json() if not t["geo_unit_id"]}
     expected = {"HOUSEHOLDS": 6500, "COFFEE_AREA_HA": 3000, "DEMO_SITES_PLANTATION": 60, "DEMO_SITES_SOIL_MOISTURE": 60,
                 "PEST_SURVEILLANCE_CLUSTERS": 30, "WOMEN_BENEFICIARIES": 2600, "CRPS_TRAINED": 100, "CRPS_WOMEN_TRAINED": 50,
                 "HH_CLIMATE_RESILIENT_ADOPTION": 4725, "HH_SOIL_MOISTURE_CONSERVATION": 4000, "HH_PEST_SURVEILLANCE": 3000,
@@ -47,7 +48,7 @@ def test_latest_programme_is_primary_with_proposed_versioned_targets(api, db, pr
     assert not db.scalar(select(ProgrammeTarget.id).where(ProgrammeTarget.target_value.in_([8000, 16000])))
     assert float(targets["OUTLAY_CR"]["target_value"]) == 15  # not the earlier ₹30 crore
     states = [g["name"] for g in pa.get("/geo-units", params={"unit_type": "state"}).json()]
-    assert sorted(states) == sorted(["Andhra Pradesh", "Nagaland", "Arunachal Pradesh", "Mizoram", "Manipur", "Meghalaya"])
+    assert sorted(states) == sorted(["Andhra Pradesh", "Odisha", "Nagaland", "Arunachal Pradesh", "Mizoram", "Manipur"])
 
 
 def test_revised_target_is_a_new_version(api, programme_id) -> None:
@@ -56,7 +57,8 @@ def test_revised_target_is_a_new_version(api, programme_id) -> None:
         "metric_code": "HOUSEHOLDS", "metric_name": "Households", "target_value": 6400, "unit": "households",
         "status": "revised", "target_version": 2, "source_note": "Revised after baseline (test)"})
     assert r.status_code == 201
-    versions = [t["target_version"] for t in pa.get(f"/programmes/{programme_id}/targets").json() if t["metric_code"] == "HOUSEHOLDS"]
+    versions = [t["target_version"] for t in pa.get(f"/programmes/{programme_id}/targets").json()
+                if t["metric_code"] == "HOUSEHOLDS" and not t["geo_unit_id"]]
     assert versions == [2, 1]
 
 

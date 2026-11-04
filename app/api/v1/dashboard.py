@@ -21,13 +21,12 @@ from app.models import (
     MonitoringRecord,
     Organisation,
     PestSurveillanceCluster,
-    PracticeRecord,
     Programme,
     ProgrammeParticipation,
-    ProgrammeTarget,
     QuarantinedRecord,
     ReviewTask,
 )
+from app.services import mrv as mrv_service
 from app.services import reports_v2
 from app.services.record_types import MODULES
 from app.services.reports import Scope
@@ -38,6 +37,12 @@ router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 
 def _count(db: Session, stmt) -> int:
     return db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
+
+
+def _households(db: Session, stmt) -> int:
+    """Distinct households in a query that selects a household key labelled 'hh'."""
+    rows = stmt.subquery()
+    return db.scalar(select(func.count(func.distinct(rows.c.hh)))) or 0
 
 
 @router.get("/breakdown")
@@ -70,11 +75,10 @@ def breakdown(by: str = Query("state", pattern="^(state|district)$"), programme_
                                                .where(in_geo, Farmer.is_archived == false())) or 0,
             "farmers_enrolled": db.scalar(select(func.count()).select_from(Farmer).where(
                 in_geo, Farmer.id.in_(enrolled), Farmer.consent_status == "given")) or 0,
-            "households_adopted_observed": db.scalar(select(func.count(func.distinct(household))).join(
-                PracticeRecord, PracticeRecord.farmer_id == Farmer.id).where(in_geo, PracticeRecord.status == "observed")) or 0,
-            "households_adopted_verified": db.scalar(select(func.count(func.distinct(household))).join(
-                PracticeRecord, PracticeRecord.farmer_id == Farmer.id).where(
-                in_geo, PracticeRecord.verification_status == "verified")) or 0,
+            # Same adoption rule as the adoption indicators and the report funnel
+            "households_adopted_observed": _households(db, reports_v2.adoption_query(programme.id).where(in_geo)),
+            "households_adopted_verified": _households(db, reports_v2.adoption_query(programme.id, verified=True)
+                                                       .where(in_geo)),
             "demonstration_sites": db.scalar(select(func.count()).select_from(DemonstrationSite).where(
                 DemonstrationSite.geo_unit_id.in_(geo_ids or {uuid.UUID(int=0)}))) or 0,
             "active_clusters": db.scalar(select(func.count()).select_from(PestSurveillanceCluster).where(
@@ -125,13 +129,9 @@ def dashboard(programme_id: uuid.UUID | None = None, current: CurrentUser = Depe
         out["coverage"] = {"farmers_registered": _count(db, farmers), "farmers_enrolled": _count(db, enrolled.distinct()),
                            "fpos": _count(db, fpos)}
     if current.has("programme.read"):
-        targets = db.scalars(select(ProgrammeTarget).where(ProgrammeTarget.programme_id == (programme.id if programme else None))
-                             .order_by(ProgrammeTarget.metric_code, ProgrammeTarget.target_version.desc())) if programme else []
-        latest: dict[str, ProgrammeTarget] = {}
-        for t in targets:
-            latest.setdefault(t.metric_code, t)
+        latest = reports_v2.latest_targets(db, programme.id) if programme else []  # programme-wide figures
         out["planning_targets"] = [{"metric_name": t.metric_name, "target_value": str(t.target_value), "unit": t.unit,
-                                    "status": t.status, "target_version": t.target_version} for t in latest.values()]
+                                    "status": t.status, "target_version": t.target_version} for t in latest]
     if programme and current.all_scope and current.has("report.read"):
         scope = Scope(db, "programme", None, None)
         out["progress"] = reports_v2.progress_vs_targets(db, programme.id, scope)
@@ -175,6 +175,7 @@ def dashboard(programme_id: uuid.UUID | None = None, current: CurrentUser = Depe
                                 for a in db.scalars(alerts).unique()]
     if current.has("mrv.read"):
         tasks = db.scalars(select(ReviewTask).where(
+            mrv_service.task_scope_condition(current),
             ReviewTask.status.in_(["pending_review", "correction_requested", "reviewed"]),
             or_(ReviewTask.assigned_reviewer_id == current.id, ReviewTask.submitted_by_id == current.id,
                 (ReviewTask.assigned_reviewer_id.is_(None)) if current.has("mrv.review") else ReviewTask.id.is_(None),

@@ -1,3 +1,6 @@
+import pytest
+
+from app.core.config import Settings, get_settings
 from tests.conftest import TEST_PASSWORD
 
 
@@ -43,6 +46,19 @@ def test_password_reset_flow(client) -> None:
 def test_forgot_password_does_not_reveal_accounts(client) -> None:
     r = client.post("/api/v1/auth/forgot-password", json={"email": "nobody@demo.local"})
     assert r.status_code == 200 and r.json()["dev_reset_token"] is None
+
+
+@pytest.mark.parametrize("app_env", ["production", "staging", "prod", "", "Production "])
+def test_reset_token_never_returned_outside_development(client, monkeypatch, app_env) -> None:
+    # A deployment with a missing, misspelt or non-development APP_ENV must never expose the reset token
+    monkeypatch.setattr(get_settings(), "app_env", app_env)
+    r = client.post("/api/v1/auth/forgot-password", json={"email": "farmer@demo.local"})
+    assert r.status_code == 200 and r.json()["dev_reset_token"] is None
+
+
+def test_app_env_defaults_to_production(monkeypatch) -> None:
+    monkeypatch.delenv("APP_ENV", raising=False)
+    assert Settings(_env_file=None, database_url="mssql+pyodbc://x", secret_key="x").is_production
 
 
 def test_admin_creates_scoped_user(api, db) -> None:

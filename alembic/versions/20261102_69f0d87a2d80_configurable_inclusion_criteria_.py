@@ -62,7 +62,9 @@ def _migrate_inclusion_down() -> None:
             UPDATE farmers SET {column} = 1 WHERE id IN (
                 SELECT a.farmer_id FROM farmer_category_assignments a JOIN beneficiary_categories c ON c.id = a.category_id
                 WHERE c.code = '{code}' AND a.status = 'active')""")
-    op.execute("UPDATE farmers SET community_name = JSON_VALUE(demographics, '$.community_name') WHERE demographics IS NOT NULL")
+    # Farmers without demographics hold the JSON literal 'null', which JSON_VALUE rejects: read JSON objects only.
+    op.execute("UPDATE farmers SET community_name = JSON_VALUE(demographics, '$.community_name') "
+               "WHERE ISJSON(demographics) = 1 AND LEFT(LTRIM(demographics), 1) = '{'")
 
 
 def upgrade() -> None:

@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import logging
 import uuid
 from typing import Any
 
@@ -40,6 +41,8 @@ from app.services.integration.canonical import (
 from app.services.settings import get_setting
 from app.services.units import UnitConversionError, convert, normalize_unit
 from app.services.validation import validate_field_record, validate_monitoring
+
+logger = logging.getLogger("mrv.integration")
 
 
 class RecordError(Exception):
@@ -340,17 +343,26 @@ def process_batch(db: Session, source: IntegrationSource, kind: str, records: li
                 quarantined[index].status = "replayed"
                 quarantined[index].resolved_at = utcnow()
                 quarantined[index].resolved_by_id = actor.id if actor else None
-        except RecordError as exc:
+        except Exception as exc:  # one bad record must never block the rest of the batch
             savepoint.rollback()
+            if isinstance(exc, RecordError):
+                errors = exc.errors
+            else:
+                # Unexpected failure (e.g. a database constraint): keep the record in quarantine with a readable reason;
+                # the technical detail goes to the server log under the request ID.
+                logger.exception("Unexpected error processing %s record %s from %s", kind, source_record_id or index,
+                                 source.source_code)
+                errors = [f"Unexpected error while processing this record ({type(exc).__name__}). The record was kept in "
+                          f"quarantine; report it to the platform team with request ID {request_id_var.get() or '-'}."]
             run.records_rejected += 1
-            outcomes.append({"index": index, "source_record_id": source_record_id, "result": "rejected", "errors": exc.errors})
+            outcomes.append({"index": index, "source_record_id": source_record_id, "result": "rejected", "errors": errors})
             if dry_run:
                 continue
             if quarantined:
-                quarantined[index].errors = exc.errors
+                quarantined[index].errors = errors
             else:
                 db.add(QuarantinedRecord(sync_run_id=run.id, source_id=source.id, payload_kind=kind,
-                                         source_record_id=source_record_id or None, payload=raw, errors=exc.errors))
+                                         source_record_id=source_record_id or None, payload=raw, errors=errors))
     run.finished_at = utcnow()
     if run.records_rejected == 0:
         run.status = "succeeded"

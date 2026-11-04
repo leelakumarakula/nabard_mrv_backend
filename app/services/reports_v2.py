@@ -12,6 +12,7 @@ from sqlalchemy import false, func, select, true
 from sqlalchemy.orm import Session
 
 from app.models import (
+    Advisory,
     AdvisoryDelivery,
     BeneficiaryCategory,
     ClusterMembership,
@@ -21,6 +22,7 @@ from app.models import (
     FarmerCategoryAssignment,
     FieldRecord,
     FieldRecordParticipant,
+    GeoUnit,
     IndicatorDefinition,
     IndicatorResult,
     PestSurveillanceCluster,
@@ -45,6 +47,23 @@ FUNNEL_DEFINITIONS = {
 }
 
 
+def adoption_query(programme_id: uuid.UUID, period_end: date | None = None, verified: bool = False,
+                   activity_codes: list[str] | None = None):
+    """Farmers (and their household key) with qualifying, field-observed adoption – the rule used by the adoption
+    indicators. Every adoption figure in reports and dashboards is built from this one query so they always agree."""
+    stmt = (select(Farmer.id.label("farmer_id"), HOUSEHOLD.label("hh"))
+            .join(PracticeRecord, PracticeRecord.farmer_id == Farmer.id)
+            .where(PracticeRecord.programme_id == programme_id,
+                   PracticeRecord.activity_code.in_(activity_codes or CLIMATE_RESILIENT_ACTIVITIES),
+                   PracticeRecord.status == "observed", PracticeRecord.evidence_basis == "observed",
+                   Farmer.is_archived == false()))
+    if period_end is not None:
+        stmt = stmt.where(PracticeRecord.action_date <= period_end)
+    if verified:
+        stmt = stmt.where(PracticeRecord.verification_status == "verified")
+    return stmt
+
+
 def _s(value: Any) -> Any:
     return str(value) if value is not None and not isinstance(value, (int, str, bool)) else value
 
@@ -54,15 +73,26 @@ def _count_households(db: Session, stmt) -> int:
     return db.scalar(select(func.count(func.distinct(sub.c.hh)))) or 0
 
 
-def progress_vs_targets(db: Session, programme_id: uuid.UUID, scope: Any) -> list[dict[str, Any]]:
-    """Latest version of each planning target, alongside the latest calculated result for its linked indicator."""
+def latest_targets(db: Session, programme_id: uuid.UUID, geo_unit_id: uuid.UUID | None = None) -> list[ProgrammeTarget]:
+    """Latest version of each planning target that applies to an area: the area's own target where the programme set one
+    (e.g. proposal §5.1 state figures), otherwise the programme-wide target. Never mixes figures of different areas."""
     targets = list(db.scalars(select(ProgrammeTarget).where(ProgrammeTarget.programme_id == programme_id)
                               .order_by(ProgrammeTarget.metric_code, ProgrammeTarget.target_version.desc())))
-    latest: dict[str, ProgrammeTarget] = {}
+    programme_wide: dict[str, ProgrammeTarget] = {}
+    own_area: dict[str, ProgrammeTarget] = {}
     for t in targets:
-        latest.setdefault(t.metric_code, t)
+        if t.geo_unit_id is None:
+            programme_wide.setdefault(t.metric_code, t)
+        elif geo_unit_id is not None and t.geo_unit_id == geo_unit_id:
+            own_area.setdefault(t.metric_code, t)
+    return [own_area.get(code, t) for code, t in programme_wide.items()] + \
+        [t for code, t in own_area.items() if code not in programme_wide]
+
+
+def progress_vs_targets(db: Session, programme_id: uuid.UUID, scope: Any) -> list[dict[str, Any]]:
+    """Latest version of each planning target, alongside the latest calculated result for its linked indicator."""
     out = []
-    for t in latest.values():
+    for t in latest_targets(db, programme_id, scope.geo_unit_id):
         result = None
         if t.indicator_code:
             stmt = (select(IndicatorResult).join(IndicatorDefinition, IndicatorDefinition.id == IndicatorResult.indicator_id)
@@ -74,6 +104,7 @@ def progress_vs_targets(db: Session, programme_id: uuid.UUID, scope: Any) -> lis
         out.append({
             "metric_code": t.metric_code, "metric_name": t.metric_name, "target_value": _s(t.target_value), "unit": t.unit,
             "target_status": t.status, "target_version": t.target_version, "indicator_code": t.indicator_code,
+            "target_area": db.get(GeoUnit, t.geo_unit_id).name if t.geo_unit_id else "Whole programme",
             "source_note": t.source_note,
             "latest_result": None if result is None else {
                 "value": _s(result.value), "period_end": result.period_end.isoformat(),
@@ -88,45 +119,53 @@ def funnel(db: Session, programme_id: uuid.UUID, scope: Any, end_dt: datetime, p
                           Farmer.geo_unit_id, Farmer.primary_fpo_id)
     enrolled = scope.apply(select(HOUSEHOLD.label("hh")).join(ProgrammeParticipation, ProgrammeParticipation.farmer_id == Farmer.id)
                            .where(ProgrammeParticipation.programme_id == programme_id, ProgrammeParticipation.status == "enrolled",
-                                  Farmer.consent_status == "given"), Farmer.geo_unit_id, Farmer.primary_fpo_id)
+                                  Farmer.consent_status == "given", Farmer.is_archived == false(),
+                                  (ProgrammeParticipation.enrolled_on.is_(None))
+                                  | (ProgrammeParticipation.enrolled_on <= period_end)),
+                           Farmer.geo_unit_id, Farmer.primary_fpo_id)
     reached = scope.apply(select(HOUSEHOLD.label("hh")).join(AdvisoryDelivery, AdvisoryDelivery.farmer_id == Farmer.id)
-                          .where(AdvisoryDelivery.delivered_at <= end_dt), Farmer.geo_unit_id, Farmer.primary_fpo_id)
+                          .join(Advisory, Advisory.id == AdvisoryDelivery.advisory_id)
+                          .where(Advisory.programme_id == programme_id, AdvisoryDelivery.delivered_at <= end_dt,
+                                 Farmer.is_archived == false()), Farmer.geo_unit_id, Farmer.primary_fpo_id)
     trained = scope.apply(select(HOUSEHOLD.label("hh")).join(FieldRecordParticipant, FieldRecordParticipant.farmer_id == Farmer.id)
                           .join(FieldRecord, FieldRecord.id == FieldRecordParticipant.field_record_id)
                           .where(FieldRecordParticipant.attended == true(), FieldRecord.validation_status == "valid",
-                                 FieldRecord.programme_id == programme_id, FieldRecord.observed_at <= end_dt),
+                                 FieldRecord.programme_id == programme_id, FieldRecord.observed_at <= end_dt,
+                                 Farmer.is_archived == false()),
                           Farmer.geo_unit_id, Farmer.primary_fpo_id)
     surveillance = scope.apply(select(HOUSEHOLD.label("hh")).join(ClusterMembership, ClusterMembership.farmer_id == Farmer.id)
-                               .where(ClusterMembership.status == "active"), Farmer.geo_unit_id, Farmer.primary_fpo_id)
+                               .join(PestSurveillanceCluster, PestSurveillanceCluster.id == ClusterMembership.cluster_id)
+                               .where(PestSurveillanceCluster.programme_id == programme_id,
+                                      ClusterMembership.status == "active", Farmer.is_archived == false(),
+                                      (ClusterMembership.joined_on.is_(None)) | (ClusterMembership.joined_on <= period_end)),
+                               Farmer.geo_unit_id, Farmer.primary_fpo_id)
     participating = trained.union(surveillance)
 
-    def adoption(**where: Any):
-        stmt = (select(HOUSEHOLD.label("hh")).join(PracticeRecord, PracticeRecord.farmer_id == Farmer.id)
-                .where(PracticeRecord.programme_id == programme_id,
-                       PracticeRecord.activity_code.in_(CLIMATE_RESILIENT_ACTIVITIES),
-                       (PracticeRecord.action_date.is_(None)) | (PracticeRecord.action_date <= period_end)))
-        for key, value in where.items():
-            stmt = stmt.where(getattr(PracticeRecord, key) == value)
-        return scope.apply(stmt, PracticeRecord.geo_unit_id, PracticeRecord.organisation_id)
+    def adopted(**kw: Any):
+        return scope.apply(adoption_query(programme_id, period_end, **kw), PracticeRecord.geo_unit_id,
+                           PracticeRecord.organisation_id)
+
+    reported_only = scope.apply(
+        select(HOUSEHOLD.label("hh")).join(PracticeRecord, PracticeRecord.farmer_id == Farmer.id)
+        .where(PracticeRecord.programme_id == programme_id, PracticeRecord.activity_code.in_(CLIMATE_RESILIENT_ACTIVITIES),
+               PracticeRecord.status == "reported", Farmer.is_archived == false(),
+               (PracticeRecord.action_date.is_(None)) | (PracticeRecord.action_date <= period_end)),
+        PracticeRecord.geo_unit_id, PracticeRecord.organisation_id)
 
     stages = {
         "registered": _count_households(db, farmers),
         "enrolled": _count_households(db, enrolled),
         "reached": _count_households(db, reached),
         "participating": _count_households(db, participating),
-        "adopted_reported": _count_households(db, adoption(status="reported")),
-        "adopted_observed": _count_households(db, adoption(status="observed", evidence_basis="observed")),
-        "adopted_verified": _count_households(db, adoption(status="observed", verification_status="verified")),
+        "adopted_reported": _count_households(db, reported_only),
+        "adopted_observed": _count_households(db, adopted()),
+        "adopted_verified": _count_households(db, adopted(verified=True)),
     }
     return {"unit": "households", "stages": stages, "definitions": FUNNEL_DEFINITIONS,
-            "conservation_households_observed": _count_households(db, scope.apply(
-                select(HOUSEHOLD.label("hh")).join(PracticeRecord, PracticeRecord.farmer_id == Farmer.id)
-                .where(PracticeRecord.programme_id == programme_id, PracticeRecord.status == "observed",
-                       PracticeRecord.activity_code.in_(CONSERVATION_ACTIVITIES)),
-                PracticeRecord.geo_unit_id, PracticeRecord.organisation_id))}
+            "conservation_households_observed": _count_households(db, adopted(activity_codes=CONSERVATION_ACTIVITIES))}
 
 
-def inclusion(db: Session, programme_id: uuid.UUID, scope: Any) -> dict[str, Any]:
+def inclusion(db: Session, programme_id: uuid.UUID, scope: Any, period_end: date | None = None) -> dict[str, Any]:
     """Aggregate counts per configured beneficiary category (explicit assignments only)."""
     enrolled = (select(Farmer.id).join(ProgrammeParticipation, ProgrammeParticipation.farmer_id == Farmer.id)
                 .where(ProgrammeParticipation.programme_id == programme_id, ProgrammeParticipation.status == "enrolled",
@@ -140,20 +179,18 @@ def inclusion(db: Session, programme_id: uuid.UUID, scope: Any) -> dict[str, Any
             FarmerCategoryAssignment.category_id == category.id, FarmerCategoryAssignment.status == "active"))
         member_filter = Farmer.id.in_(members)
 
-        def adopted(member_filter: Any = member_filter, **where: Any) -> int:
-            stmt = (select(func.count(func.distinct(Farmer.id))).join(PracticeRecord, PracticeRecord.farmer_id == Farmer.id)
-                    .where(in_ids, member_filter))
-            for key, value in where.items():
-                stmt = stmt.where(getattr(PracticeRecord, key) == value)
-            return db.scalar(stmt) or 0
+        def adopted(member_filter: Any = member_filter, verified: bool = False) -> int:
+            rows = scope.apply(adoption_query(programme_id, period_end, verified=verified).where(member_filter),
+                               PracticeRecord.geo_unit_id, PracticeRecord.organisation_id).subquery()
+            return db.scalar(select(func.count(func.distinct(rows.c.farmer_id)))) or 0
 
         categories.append({
             "code": category.code, "name": category.name, "definition_status": category.status,
             "sensitive": category.is_sensitive,
             "enrolled_members": db.scalar(select(func.count()).select_from(Farmer).where(in_ids, member_filter)) or 0,
             "enrolled_households": db.scalar(select(func.count(func.distinct(HOUSEHOLD))).where(in_ids, member_filter)) or 0,
-            "members_with_observed_adoption": adopted(status="observed"),
-            "members_with_verified_adoption": adopted(verification_status="verified"),
+            "members_with_observed_adoption": adopted(),
+            "members_with_verified_adoption": adopted(verified=True),
         })
     crps = scope.apply(select(CommunityResourcePerson.status, CommunityResourcePerson.gender, func.count())
                        .where(CommunityResourcePerson.programme_id == programme_id)
@@ -171,7 +208,8 @@ def inclusion(db: Session, programme_id: uuid.UUID, scope: Any) -> dict[str, Any
         "categories": categories,
         "community_resource_persons": {"by_status": by_status, "trained": trained, "women_trained": women_trained},
         "note": "Aggregate counts of explicitly assigned beneficiary categories; category definitions show their approval "
-                "status. Training or advisory receipt is not counted as adoption.",
+                "status. Adoption counts use the same rule as the adoption indicators (qualifying practice, field-observed, "
+                "this programme); training or advisory receipt is not counted as adoption.",
     }
 
 

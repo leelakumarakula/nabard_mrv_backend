@@ -159,14 +159,31 @@ def record_result(db: Session, current: CurrentUser, item: VerificationSampleIte
     item.verified_by_id, item.verified_at = current.id, utcnow()
     sample.status = "in_progress"
     if isinstance(entity, PracticeRecord):
-        status = {"confirmed": "verified", "discrepancy": "not_verified", "not_found": "not_verified"}.get(item.result)
-        if status:
+        db.flush()
+        status = practice_status_from_visits(db, entity.id)
+        if status != entity.verification_status:
             audit.record(db, current, "verification_result", "practice_record", entity.id,
                          before={"verification_status": entity.verification_status}, after={"verification_status": status})
             entity.verification_status = status
     audit.record(db, current, "record_result", "verification_sample_item", item.id, before=before,
                  after={"result": item.result, "discrepancy_note": item.discrepancy_note})
     return item
+
+
+VISIT_OUTCOME = {"confirmed": "verified", "discrepancy": "not_verified", "not_found": "not_verified"}
+
+
+def practice_status_from_visits(db: Session, practice_id: uuid.UUID) -> str:
+    """A practice's verification status follows its latest conclusive visit result (confirmed / discrepancy / not found)
+    across all samples. If no conclusive result remains – e.g. a result was corrected to 'not visited' – it returns to
+    unverified, so a withdrawn confirmation never leaves the practice marked verified."""
+    items = db.scalars(select(VerificationSampleItem).where(
+        VerificationSampleItem.entity_type == "practice_record", VerificationSampleItem.entity_id == practice_id,
+        VerificationSampleItem.result.in_(list(VISIT_OUTCOME)))).all()
+    if not items:
+        return "unverified"
+    latest = max(items, key=lambda i: (i.verified_at or i.updated_at or i.created_at, i.created_at))
+    return VISIT_OUTCOME[latest.result]
 
 
 def complete(db: Session, current: CurrentUser, sample: VerificationSample, conclusion: str, note: str) -> VerificationSample:

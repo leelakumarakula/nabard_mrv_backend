@@ -1,7 +1,7 @@
 import hmac
 import uuid
 
-from fastapi import APIRouter, Depends, Header
+from fastapi import APIRouter, Depends, Header, Request
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -73,7 +73,8 @@ def _source_out(db: Session, source: IntegrationSource) -> SourceOut:
         "last_sync_status": last.status if last else None, "open_quarantine": open_q})
 
 
-def inbound_actor(source_code: str, x_source_key: str | None = Header(None), token: str | None = Depends(oauth2_scheme),
+def inbound_actor(source_code: str, request: Request, x_source_key: str | None = Header(None),
+                  token: str | None = Depends(oauth2_scheme),
                   db: Session = Depends(get_db)) -> tuple[IntegrationSource, CurrentUser | None]:
     """Inbound calls authenticate with the source's API key (X-Source-Key) or a user token with integration.manage."""
     source = _source(db, source_code)
@@ -83,7 +84,7 @@ def inbound_actor(source_code: str, x_source_key: str | None = Header(None), tok
         if not source.inbound_key_hash or not hmac.compare_digest(source.inbound_key_hash, hash_token(x_source_key)):
             raise AppError(401, "invalid_source_key", "Invalid source key")
         return source, None
-    current = get_current_user(token, db)
+    current = get_current_user(request, token, db)
     current.require("integration.manage")
     return source, current
 

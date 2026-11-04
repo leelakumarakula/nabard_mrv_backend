@@ -125,6 +125,10 @@ class FarmOut(ORMModel):
     is_archived: bool
 
 
+# Proposal §5.2 plantation maturity categories
+PlantationStage = Literal["productive", "young", "underperforming"]
+
+
 class PlotIn(BaseModel):
     plot_code: str = Field(min_length=2, max_length=50)
     area: Decimal | None = Field(default=None, ge=0)
@@ -136,6 +140,7 @@ class PlotIn(BaseModel):
     crop: Literal["arabica", "robusta", "mixed", "other"] | None = None
     variety: str | None = None
     plantation_year: int | None = Field(default=None, ge=1800, le=2100)
+    plantation_stage: PlantationStage | None = None
     shade_type: str | None = None
     irrigation_type: str | None = None
 
@@ -150,6 +155,7 @@ class PlotUpdate(BaseModel):
     crop: Literal["arabica", "robusta", "mixed", "other"] | None = None
     variety: str | None = None
     plantation_year: int | None = Field(default=None, ge=1800, le=2100)
+    plantation_stage: PlantationStage | None = None
     shade_type: str | None = None
     irrigation_type: str | None = None
     is_archived: bool | None = None
@@ -168,6 +174,7 @@ class PlotOut(ORMModel):
     crop: str | None
     variety: str | None
     plantation_year: int | None
+    plantation_stage: str | None
     shade_type: str | None
     irrigation_type: str | None
     is_demo: bool

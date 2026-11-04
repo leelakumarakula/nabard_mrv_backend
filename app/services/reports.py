@@ -241,13 +241,16 @@ def build(db: Session, programme: Programme, report_type: str, period_start: dat
     full = template is not None or report_type in ("programme", "geography", "fpo", "quarterly", "annual", "nabard_ccf_id",
                                                      "endline")
     if full:
+        areas = {g.id: g.name for g in db.scalars(select(GeoUnit).where(
+            GeoUnit.id.in_({t.geo_unit_id for t in targets if t.geo_unit_id} or {uuid.UUID(int=0)})))}
         content["planning_targets"] = [{"metric_code": t.metric_code, "metric_name": t.metric_name,
+                                        "area": areas.get(t.geo_unit_id, "Whole programme"),
                                         "target_value": _s(t.target_value), "unit": t.unit, "status": t.status,
                                         "target_version": t.target_version, "source_note": t.source_note} for t in targets]
         content["progress_vs_targets"] = v2.progress_vs_targets(db, programme.id, scope)
         content["funnel"] = v2.funnel(db, programme.id, scope, end_dt, period_end)
         content["coverage"] = coverage(db, programme, scope, period_end)
-        content["inclusion"] = v2.inclusion(db, programme.id, scope)
+        content["inclusion"] = v2.inclusion(db, programme.id, scope, period_end)
         content["demonstrations"] = v2.demonstrations(db, programme.id, scope, start_dt, end_dt)
         content["surveillance"] = v2.surveillance(db, programme.id, scope, start_dt, end_dt, period_start, period_end)
         content["indicator_results"] = indicator_results(db, programme, scope, period_start, period_end)
@@ -260,7 +263,7 @@ def build(db: Session, programme: Programme, report_type: str, period_start: dat
     elif report_type == "surveillance":
         content["surveillance"] = v2.surveillance(db, programme.id, scope, start_dt, end_dt, period_start, period_end)
     elif report_type == "inclusion":
-        content["inclusion"] = v2.inclusion(db, programme.id, scope)
+        content["inclusion"] = v2.inclusion(db, programme.id, scope, period_end)
         content["funnel"] = v2.funnel(db, programme.id, scope, end_dt, period_end)
     elif report_type == "verification":
         content["verification"] = v2.verification(db, programme.id)
@@ -299,10 +302,12 @@ def to_csv(content: dict[str, Any]) -> str:
     for key, value in meta.items():
         writer.writerow(["meta", key, value, "", "", ""])
     for t in content.get("planning_targets", []):
-        writer.writerow(["planning_targets", t["metric_name"], t["target_value"], t["unit"], t["status"], t.get("source_note") or ""])
+        writer.writerow(["planning_targets", f"{t['metric_name']} ({t.get('area', 'Whole programme')})", t["target_value"],
+                         t["unit"], t["status"], t.get("source_note") or ""])
     for t in content.get("progress_vs_targets", []):
         res = t.get("latest_result") or {}
-        writer.writerow(["progress_vs_targets", t["metric_name"], res.get("value", ""), t["unit"],
+        writer.writerow(["progress_vs_targets", f"{t['metric_name']} ({t.get('target_area', 'Whole programme')})",
+                         res.get("value", ""), t["unit"],
                          f"target={t['target_value']} ({t['target_status']} v{t['target_version']}); "
                          f"verification={res.get('verification_status', 'not calculated')}",
                          "PROVISIONAL" if res.get("provisional") else ""])

@@ -81,6 +81,10 @@ class TargetIn(BaseModel):
 
 
 class TargetUpdate(BaseModel):
+    """Descriptive changes and status/approval only. The figure itself (value, unit, period, version) never changes in
+    place – a changed figure is a new version (POST /programme-targets/{id}/revise). Those fields are accepted only when
+    they equal the stored values, so a client that sends the whole record still works."""
+
     metric_name: str | None = None
     target_value: Decimal | None = None
     unit: str | None = None
@@ -89,6 +93,16 @@ class TargetUpdate(BaseModel):
     source_note: str | None = None
     target_version: int | None = Field(default=None, ge=1)
     indicator_code: str | None = None
+
+
+class TargetRevision(BaseModel):
+    """A revised figure for an existing target, stored as the next version; earlier versions are kept unchanged."""
+
+    target_value: Decimal
+    unit: str | None = None
+    period_label: str | None = None
+    status: TargetStatus = "revised"
+    source_note: str = Field(min_length=3, description="Why the figure changed and who approved it")
 
 
 class TargetOut(ORMModel):

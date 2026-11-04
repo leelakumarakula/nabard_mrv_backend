@@ -3,7 +3,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import func, select, update
+from sqlalchemy import and_, func, or_, select, true, update
 from sqlalchemy.orm import Session
 
 from app.core.deps import CurrentUser, build_current_user, descendant_geo_ids
@@ -176,6 +176,57 @@ def run_calculation(db: Session, current: CurrentUser, indicator: IndicatorDefin
     return run, result
 
 
+# -- record-level scope for MRV items -------------------------------------------------------------------------------
+# Results and calculation runs are located by their calculation scope; baselines and monitoring records by their own
+# geography/organisation. Programme-wide items (no scope) are visible only to users with access to every geography.
+
+def _in_scope(current: CurrentUser, geo_col: Any, org_col: Any) -> Any:
+    return or_(geo_col.in_(current.geo_ids or {uuid.UUID(int=0)}), org_col.in_(current.org_ids or {uuid.UUID(int=0)}))
+
+
+def scoped_results(stmt: Any, current: CurrentUser, model: Any = IndicatorResult) -> Any:
+    """Restrict results (or calculation runs, which share the scope columns) to the user's geography/organisations."""
+    if current.all_scope:
+        return stmt
+    return stmt.where(_in_scope(current, model.scope_geo_unit_id, model.scope_organisation_id))
+
+
+def task_scope_condition(current: CurrentUser) -> Any:
+    """Review tasks a scoped user may see: those on records in their area, plus tasks they submitted or are assigned."""
+    if current.all_scope:
+        return true()
+    located = [
+        and_(ReviewTask.entity_type == "indicator_result", ReviewTask.entity_id.in_(
+            select(IndicatorResult.id).where(_in_scope(current, IndicatorResult.scope_geo_unit_id,
+                                                       IndicatorResult.scope_organisation_id)))),
+        and_(ReviewTask.entity_type == "monitoring_record", ReviewTask.entity_id.in_(
+            select(MonitoringRecord.id).where(_in_scope(current, MonitoringRecord.geo_unit_id,
+                                                        MonitoringRecord.organisation_id)))),
+        and_(ReviewTask.entity_type == "baseline_record", ReviewTask.entity_id.in_(
+            select(BaselineRecord.id).where(_in_scope(current, BaselineRecord.geo_unit_id,
+                                                      BaselineRecord.organisation_id)))),
+    ]
+    return or_(ReviewTask.submitted_by_id == current.id, ReviewTask.assigned_reviewer_id == current.id, *located)
+
+
+def entity_location(entity: Any) -> tuple[uuid.UUID | None, uuid.UUID | None]:
+    if isinstance(entity, (IndicatorResult, CalculationRun)):
+        return entity.scope_geo_unit_id, entity.scope_organisation_id
+    return entity.geo_unit_id, entity.organisation_id
+
+
+def ensure_entity_access(current: CurrentUser, entity: Any) -> None:
+    geo, org = entity_location(entity)
+    if not current.all_scope and not current.can_access(geo, org):
+        raise Forbidden("This record is outside your assigned geography or organisation")
+
+
+def ensure_task_access(db: Session, current: CurrentUser, task: ReviewTask) -> None:
+    if current.all_scope or current.id in (task.submitted_by_id, task.assigned_reviewer_id):
+        return
+    ensure_entity_access(current, get_entity(db, task.entity_type, task.entity_id))
+
+
 def get_entity(db: Session, entity_type: str, entity_id: uuid.UUID) -> Any:
     model = REVIEWABLE.get(entity_type)
     if model is None:
@@ -201,6 +252,7 @@ def _check_reviewer(db: Session, reviewer_id: uuid.UUID | None, submitter_id: uu
 def submit_for_review(db: Session, current: CurrentUser, entity_type: str, entity_id: uuid.UUID,
                       reviewer_id: uuid.UUID | None, due_date: date | None, note: str | None) -> ReviewTask:
     entity = get_entity(db, entity_type, entity_id)
+    ensure_entity_access(current, entity)
     if entity_type == "indicator_result":
         if entity.calculation_status != "calculated":
             raise InvalidState("Only successfully calculated results can be submitted for review")

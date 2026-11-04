@@ -2,11 +2,12 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from fastapi import Depends
+from fastapi import Depends, Request
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.core.errors import AppError, Forbidden
 from app.core.permissions import SCOPE_ALL
 from app.core.security import decode_access_token
@@ -83,7 +84,12 @@ def build_current_user(db: Session, user: User) -> CurrentUser:
     )
 
 
-def get_current_user(token: str | None = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> CurrentUser:
+# While a temporary password is in force the account may only read/update its own profile and change the password.
+PASSWORD_CHANGE_PATHS = {"/auth/me", "/auth/change-password"}
+
+
+def get_current_user(request: Request, token: str | None = Depends(oauth2_scheme),
+                     db: Session = Depends(get_db)) -> CurrentUser:
     unauthorized = AppError(401, "unauthorized", "Not authenticated")
     if not token:
         raise unauthorized
@@ -91,6 +97,11 @@ def get_current_user(token: str | None = Depends(oauth2_scheme), db: Session = D
     user = db.get(User, user_id) if user_id else None
     if user is None or user.status != "active":
         raise unauthorized
+    if user.must_change_password:
+        path = request.url.path.removeprefix(get_settings().api_v1_prefix)
+        if path not in PASSWORD_CHANGE_PATHS:
+            raise AppError(403, "password_change_required",
+                           "Change your temporary password before using the platform (Profile → Change password)")
     return build_current_user(db, user)
 
 

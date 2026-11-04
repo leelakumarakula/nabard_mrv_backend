@@ -70,13 +70,15 @@ PROPOSAL_TITLE = "Climate-Resilient Coffee Landscapes and Inclusive Rural Liveli
 SOURCE_NOTE = (f"{PROPOSAL_TITLE}, proposal dated 29 Oct 2026 – proposal figure; requires programme-owner approval. "
                "Not sanctioned or achieved.")
 
-# Six states per Version 2.0 §1 (spec text). The architecture diagram lists Odisha instead of Meghalaya – pending confirmation.
-STATES = [("AP", "Andhra Pradesh"), ("NL", "Nagaland"), ("AR", "Arunachal Pradesh"), ("MZ", "Mizoram"),
-          ("MN", "Manipur"), ("ML", "Meghalaya")]
+# Six states per the proposal submitted to NABARD (29 Oct 2026, §5.1) and the architecture diagram. The V2 specification
+# text listed Meghalaya instead of Odisha in error; the proposal is the primary scope document.
+STATES = [("AP", "Andhra Pradesh"), ("OD", "Odisha"), ("NL", "Nagaland"), ("AR", "Arunachal Pradesh"), ("MZ", "Mizoram"),
+          ("MN", "Manipur")]
 # Illustrative district placement for demo data only (final district/cluster master lists are pending, V2 §15).
-DISTRICTS = {"AP": ["Alluri Sitharama Raju", "Anakapalli"], "NL": ["Kohima"], "AR": ["Papum Pare"], "MZ": ["Aizawl"],
-             "MN": ["Ukhrul"], "ML": ["East Khasi Hills"]}
-NORTH_EAST = {"NL", "AR", "MZ", "MN", "ML"}
+# Araku Valley lies in Alluri Sitharama Raju district (AP); Koraput is the proposal's Odisha geography.
+DISTRICTS = {"AP": ["Alluri Sitharama Raju", "Anakapalli"], "OD": ["Koraput"], "NL": ["Kohima"], "AR": ["Papum Pare"],
+             "MZ": ["Aizawl"], "MN": ["Ukhrul"]}
+NORTH_EAST = {"NL", "AR", "MZ", "MN"}
 
 TARGETS = [  # metric_code, name, value, unit, linked indicator code
     ("HOUSEHOLDS", "Households (proposed/target)", 6500, "households", None),
@@ -97,6 +99,13 @@ TARGETS = [  # metric_code, name, value, unit, linked indicator code
     ("IOT_DEVICES", "IoT devices (planning ceiling – confirm final equipment schedule)", 1200, "devices", None),
     ("OUTLAY_CR", "Indicative outlay (not sanctioned)", 15, "INR crore", None),
 ]
+
+# State-wise planning targets, proposal §5.1 (households, existing plantation area in ha). They add up to the programme
+# totals of 6,500 households and 3,000 ha. Indicative planning figures, to be validated through baseline assessment.
+STATE_TARGETS = {"AP": (3300, 1500), "OD": (1500, 700), "NL": (1000, 450), "AR": (250, 120), "MZ": (300, 150),
+                 "MN": (150, 80)}
+STATE_SOURCE_NOTE = (f"{PROPOSAL_TITLE}, proposal dated 29 Oct 2026, §5.1 state-wise coverage – indicative planning target; "
+                     "final coverage validated through consultations and baseline assessment. Not sanctioned or achieved.")
 
 PENDING = "Pending programme-owner approval."
 # code, name, family, module, unit, method, params, definition, limitations
@@ -149,6 +158,21 @@ INDICATORS = [
      "Illustrates formula configuration only; numerator and denominator units differ (households vs farmers)."),
     ("COV_FARMERS_ENROLLED", "Farmers enrolled with consent", "Programme coverage", None, "farmers", "enrolled_farmers", {},
      "Distinct farmers with an active enrolment and recorded consent at period end.", "Avoid duplicate counts."),
+    # Proposal §10.1 outcome indicators. Catalogued so they are tracked, but deliberately without a calculation method:
+    # the measurement approach (baseline, comparison basis, data collection) must be defined and approved first.
+    ("OUT_IRRIGATION_WATER_REDUCTION", "Reduction in irrigation water use on eligible irrigated farms", "Outcome", "water",
+     "% change", None, {},
+     "Change in measured irrigation water use on eligible irrigated farms against their baseline. Proposal §10.1: "
+     "indicative 10–15% reduction, subject to baseline validation.",
+     "Indicative evaluation objective, not a guaranteed outcome (§10.3). Measurement approach pending approval."),
+    ("OUT_PEST_RESPONSE_TIME", "Improvement in pest-management response time", "Outcome", "pest", "% change", None, {},
+     "Change in the interval between pest detection and management action against the baseline interval. Proposal "
+     "§10.1: indicative 20% improvement, subject to field validation.",
+     "Needs an approved way to record detection and action dates per case. Measurement approach pending approval."),
+    ("OUT_CROP_LOSS_REDUCTION", "Reduction in climate-related crop losses", "Outcome", "suitability", "% change", None, {},
+     "Change in climate-related crop losses in eligible established plantations against historical and seasonal loss "
+     "assessment. Proposal §10.1: indicative 5–10% reduction, subject to evaluation.",
+     "Not assumed for emerging or non-bearing plantations (§10.3). Loss-assessment method pending approval."),
 ]
 
 DEMO_USERS = [
@@ -217,12 +241,14 @@ class DemoBuilder:
         self.states, self.districts, self.clusters = {}, {}, []
         for code, name in STATES:
             self.states[code] = GeoUnit(unit_type="state", name=name, code=f"IN-{code}", is_demo=False)
-            if code == "ML":
-                self.states[code].requires_confirmation = True
-                self.states[code].confirmation_note = ("Provisional: V2 specification text lists Meghalaya; the V2 architecture "
-                                                       "diagram lists Odisha instead. Pending programme-owner confirmation.")
             db.add(self.states[code])
         db.flush()
+        for code, (households, area_ha) in STATE_TARGETS.items():
+            for metric, name, value, unit in (("HOUSEHOLDS", "Households (proposed/target)", households, "households"),
+                                              ("COFFEE_AREA_HA", "Existing coffee area", area_ha, "ha")):
+                db.add(ProgrammeTarget(programme_id=prog.id, metric_code=metric, metric_name=name, target_value=Decimal(value),
+                                       unit=unit, period_label="36 months", status="proposed", target_version=1,
+                                       geo_unit_id=self.states[code].id, source_note=STATE_SOURCE_NOTE, is_demo=False))
         for sc, names in DISTRICTS.items():
             for i, dname in enumerate(names):
                 d = GeoUnit(parent_id=self.states[sc].id, unit_type="district", name=dname, code=f"IN-{sc}-D{i + 1}",
@@ -597,7 +623,8 @@ class DemoBuilder:
             self.indicators[code] = self.add(IndicatorDefinition(
                 code=code, version=1, name=name, family=family, module_code=module, definition=definition, unit=unit,
                 method_code=method, method_parameters=params,
-                method_reference=f"Platform aggregation method {method} v1.0 (demo). {PENDING}",
+                method_reference=(f"Platform aggregation method {method} v1.0 (demo). {PENDING}" if method else
+                                  f"No calculation method yet – measurement approach to be defined. {PENDING}"),
                 frequency="quarterly", scope_level="programme/state/district/cluster/FPO", aggregation_rule="See method",
                 disaggregation="state, district, FPO/grower group, gender (where approved)", baseline_method=PENDING,
                 data_sources="MRV platform records", eligibility=PENDING, exclusions=PENDING,

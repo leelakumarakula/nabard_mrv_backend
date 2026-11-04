@@ -1,10 +1,11 @@
 import uuid
 
 from fastapi import APIRouter, Depends
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.deps import CurrentUser, require
+from app.core.errors import AppError, Conflict
 from app.db.session import get_db
 from app.models import Organisation, Programme, ProgrammeOrganisation, ProgrammeTarget, ReportingPeriod
 from app.schemas.common import Page, PageParams, page_of, paginate
@@ -19,9 +20,11 @@ from app.schemas.programme import (
     ProgrammeUpdate,
     TargetIn,
     TargetOut,
+    TargetRevision,
     TargetUpdate,
 )
 from app.services import crud
+from app.services.scope import eq_or_null
 
 router = APIRouter(tags=["programmes"])
 
@@ -65,19 +68,60 @@ def list_targets(programme_id: uuid.UUID, current: CurrentUser = Depends(require
                            .order_by(ProgrammeTarget.metric_code, ProgrammeTarget.target_version.desc())))
 
 
+def _latest_version(db: Session, programme_id: uuid.UUID, metric_code: str, geo_unit_id: uuid.UUID | None) -> int:
+    """Highest stored version of a target (same programme, metric and geography); 0 when the target is new."""
+    return db.scalar(select(func.max(ProgrammeTarget.target_version)).where(
+        ProgrammeTarget.programme_id == programme_id, ProgrammeTarget.metric_code == metric_code,
+        eq_or_null(ProgrammeTarget.geo_unit_id, geo_unit_id))) or 0
+
+
 @router.post("/programmes/{programme_id}/targets", response_model=TargetOut, status_code=201)
 def create_target(programme_id: uuid.UUID, body: TargetIn, current: CurrentUser = Depends(require("programme.manage")),
                   db: Session = Depends(get_db)) -> ProgrammeTarget:
     crud.get_or_404(db, Programme, programme_id, "Programme")
+    latest = _latest_version(db, programme_id, body.metric_code, body.geo_unit_id)
+    if latest and body.target_version <= latest:
+        raise Conflict(f"Target '{body.metric_code}' already has version {latest}. Record a changed figure as a new "
+                       "version (Revise target) – earlier versions are never overwritten.")
     obj = crud.create(db, current, ProgrammeTarget, {**body.model_dump(), "programme_id": programme_id}, "programme_target")
     db.commit()
     return obj
 
 
+# Fields that define the figure itself; they change only through a new version.
+_FIGURE_FIELDS = ("target_value", "unit", "period_label", "target_version")
+
+
 @router.patch("/programme-targets/{target_id}", response_model=TargetOut)
 def update_target(target_id: uuid.UUID, body: TargetUpdate, current: CurrentUser = Depends(require("programme.manage")),
                   db: Session = Depends(get_db)) -> ProgrammeTarget:
-    obj = crud.update(db, current, crud.get_or_404(db, ProgrammeTarget, target_id, "Target"), body, "programme_target")
+    target = crud.get_or_404(db, ProgrammeTarget, target_id, "Target")
+    data = body.model_dump(exclude_unset=True)
+    changed = [f for f in _FIGURE_FIELDS if f in data and data[f] != getattr(target, f)]
+    if changed:
+        raise AppError(422, "target_figure_locked",
+                       f"{', '.join(changed)} cannot be changed in place. Use 'Revise target' to record the changed "
+                       "figure as a new version; the current version stays in the history.")
+    for f in _FIGURE_FIELDS:
+        data.pop(f, None)
+    obj = crud.update(db, current, target, data, "programme_target")
+    db.commit()
+    return obj
+
+
+@router.post("/programme-targets/{target_id}/revise", response_model=TargetOut, status_code=201)
+def revise_target(target_id: uuid.UUID, body: TargetRevision, current: CurrentUser = Depends(require("programme.manage")),
+                  db: Session = Depends(get_db)) -> ProgrammeTarget:
+    """Record a changed figure as the next version of the target. The earlier version is kept unchanged."""
+    base = crud.get_or_404(db, ProgrammeTarget, target_id, "Target")
+    version = _latest_version(db, base.programme_id, base.metric_code, base.geo_unit_id) + 1
+    obj = crud.create(db, current, ProgrammeTarget, {
+        "programme_id": base.programme_id, "metric_code": base.metric_code, "metric_name": base.metric_name,
+        "geo_unit_id": base.geo_unit_id, "indicator_code": base.indicator_code, "is_demo": base.is_demo,
+        "target_value": body.target_value, "unit": body.unit or base.unit,
+        "period_label": body.period_label if body.period_label is not None else base.period_label,
+        "status": body.status, "source_note": body.source_note, "target_version": version,
+    }, "programme_target", summary=f"{base.metric_code} revised to v{version}: {base.target_value} → {body.target_value}")
     db.commit()
     return obj
 

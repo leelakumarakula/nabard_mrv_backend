@@ -85,6 +85,8 @@ class FarmPlot(Base, EntityBase, DemoMixin, ArchiveMixin):
     crop: Mapped[str | None] = mapped_column(Unicode(40))  # arabica | robusta | mixed
     variety: Mapped[str | None] = mapped_column(Unicode(80))
     plantation_year: Mapped[int | None] = mapped_column(Integer)
+    # Proposal §5.2: interventions follow verified plantation maturity – productive | young | underperforming
+    plantation_stage: Mapped[str | None] = mapped_column(Unicode(30))
     shade_type: Mapped[str | None] = mapped_column(Unicode(80))
     irrigation_type: Mapped[str | None] = mapped_column(Unicode(80))
 

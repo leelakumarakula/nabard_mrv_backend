@@ -64,8 +64,9 @@ def forgot_password(body: ForgotPasswordIn, db: Session = Depends(get_db)) -> Fo
     ))
     audit.record(db, None, "password_reset_requested", "user", user.id)
     db.commit()
-    # No email/SMS delivery service is configured yet; outside production the token is returned for testing.
-    return ForgotPasswordOut(message=message, dev_reset_token=None if settings.is_production else token)
+    # No email/SMS delivery service is configured yet. Only an explicitly named development/test environment gets the token
+    # back in the response; any other value of APP_ENV (including a missing or misspelt one) never reveals it.
+    return ForgotPasswordOut(message=message, dev_reset_token=token if settings.is_development else None)
 
 
 @router.post("/reset-password", response_model=Message)

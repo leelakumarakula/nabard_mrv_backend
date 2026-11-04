@@ -45,8 +45,9 @@ def main() -> None:
             db.commit()
             print("Role permissions restored to defaults.")
         elif args.command == "demo":
-            if settings.is_production:
-                sys.exit("Refusing to load synthetic demo data into a production environment.")
+            if not settings.is_development:
+                sys.exit(f"Refusing to load synthetic demo data: APP_ENV is '{settings.app_env}'. "
+                         "Set APP_ENV=local (or development/test) for a local database.")
             from app.seed.demo import seed_demo
             password = args.password or os.environ.get("DEMO_USER_PASSWORD")
             generated = password is None

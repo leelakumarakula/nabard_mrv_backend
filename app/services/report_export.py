@@ -48,11 +48,13 @@ def section_tables(content: dict[str, Any]) -> list[tuple[str, list[str], list[l
         if not data:
             continue
         if key == "progress_vs_targets":
-            rows = [[p["metric_name"], p["target_value"], p["unit"], f"{p['target_status']} v{p['target_version']}",
+            rows = [[p["metric_name"], p.get("target_area", "Whole programme"), p["target_value"], p["unit"],
+                     f"{p['target_status']} v{p['target_version']}",
                      (p.get("latest_result") or {}).get("value", ""),
                      (p.get("latest_result") or {}).get("verification_status", "not calculated"),
                      "PROVISIONAL" if (p.get("latest_result") or {}).get("provisional") else ""] for p in data]
-            tables.append((title, ["Target", "Planned", "Unit", "Target status", "Latest value", "Verification", "Note"], rows))
+            tables.append((title, ["Target", "Area", "Planned", "Unit", "Target status", "Latest value", "Verification",
+                                   "Note"], rows))
         elif key == "funnel":
             rows = [[stage, n, data["definitions"].get(stage, "")] for stage, n in data["stages"].items()]
             tables.append((title, ["Stage", f"Count ({data['unit']})", "Definition"], rows))

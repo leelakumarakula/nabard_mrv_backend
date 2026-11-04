@@ -4,6 +4,7 @@ These are real open questions, not demo data. Each states the provisional treatm
 """
 
 import uuid
+from datetime import date
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -13,7 +14,7 @@ from app.models import ProgrammeDecision
 DECISIONS = [
     ("SIXTH_STATE", "scope", "Sixth programme state",
      "Is the sixth state Meghalaya (V2 specification text) or Odisha (V2 architecture diagram)?",
-     "Meghalaya configured provisionally and flagged 'requires confirmation' in geography; the state list is configurable.",
+     "Odisha configured as in the proposal; the state list is configurable.",
      ["Geography", "State reports", "Dashboard breakdown"]),
     ("MASTER_LISTS", "scope", "District, cluster and FPO/grower-group master lists",
      "Which districts, clusters and FPOs/grower groups are in the programme?",
@@ -74,14 +75,25 @@ DECISIONS = [
      ["Registry"]),
 ]
 
+# Questions already answered by the proposal submitted to NABARD (the primary scope document).
+DECIDED = {
+    "SIXTH_STATE": {
+        "decision": "Odisha (Koraput). The proposal lists Andhra Pradesh, Odisha, Nagaland, Arunachal Pradesh, Mizoram and "
+                    "Manipur; 'Meghalaya' in the V2 specification text was an error.",
+        "decided_by": "Proposal submitted to NABARD (29 Oct 2026, §1 and §5.1)",
+        "decided_on": date(2026, 10, 29),
+    },
+}
+
 
 def seed_programme_decisions(db: Session, programme_id: uuid.UUID | None) -> int:
     added = 0
     for code, category, title, question, provisional, affects in DECISIONS:
         if db.scalar(select(ProgrammeDecision.id).where(ProgrammeDecision.code == code)) is None:
+            decided = DECIDED.get(code)
             db.add(ProgrammeDecision(programme_id=programme_id, code=code, category=category, title=title, question=question,
                                      provisional_treatment=provisional, affects=affects, owner="Programme owner (NABARD / Varsapradaya)",
-                                     status="pending"))
+                                     status="decided" if decided else "pending", **(decided or {})))
             added += 1
     db.flush()
     return added

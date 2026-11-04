@@ -44,13 +44,20 @@ def database() -> Iterator[None]:
     with engine.begin() as conn:
         conn.execute(text("IF OBJECT_ID('alembic_version') IS NOT NULL DROP TABLE alembic_version"))
     alembic_cfg = Config("alembic.ini")
+
+    def seed() -> None:
+        with Session(engine, autoflush=False, expire_on_commit=False) as db:
+            seed_reference(db)
+            seed_demo(db, TEST_PASSWORD)
+            db.commit()
+
     command.upgrade(alembic_cfg, "head")
-    command.downgrade(alembic_cfg, "base")  # every migration must also roll back cleanly
+    seed()
+    # Every migration must also roll back cleanly on a database that holds data (data migrations included), not only
+    # on an empty one; then the schema is rebuilt from scratch for the tests.
+    command.downgrade(alembic_cfg, "base")
     command.upgrade(alembic_cfg, "head")
-    with Session(engine, autoflush=False, expire_on_commit=False) as db:
-        seed_reference(db)
-        seed_demo(db, TEST_PASSWORD)
-        db.commit()
+    seed()
     yield
 
 

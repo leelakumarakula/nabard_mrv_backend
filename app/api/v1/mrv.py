@@ -93,19 +93,22 @@ def list_runs(params: PageParams = Depends(), indicator_id: uuid.UUID | None = N
         stmt = stmt.where(CalculationRun.indicator_id == indicator_id)
     if status:
         stmt = stmt.where(CalculationRun.status == status)
-    items, total = paginate(db, stmt, params)
+    items, total = paginate(db, mrv.scoped_results(stmt, current, CalculationRun), params)
     return {"items": [CalculationRunOut.model_validate(i) for i in items], "total": total, "page": params.page,
             "page_size": params.page_size}
 
 
 @router.get("/calculation-runs/{run_id}", response_model=CalculationRunOut)
 def get_run(run_id: uuid.UUID, current: CurrentUser = Depends(require("mrv.read")), db: Session = Depends(get_db)):
-    return crud.get_or_404(db, CalculationRun, run_id, "Calculation run")
+    run = crud.get_or_404(db, CalculationRun, run_id, "Calculation run")
+    mrv.ensure_entity_access(current, run)
+    return run
 
 
 @router.get("/calculation-runs/{run_id}/inputs", response_model=Page[RunInputOut])
 def get_run_inputs(run_id: uuid.UUID, params: PageParams = Depends(), current: CurrentUser = Depends(require("mrv.read")),
                    db: Session = Depends(get_db)) -> dict:
+    mrv.ensure_entity_access(current, crud.get_or_404(db, CalculationRun, run_id, "Calculation run"))
     stmt = (select(CalculationRunInput).where(CalculationRunInput.calculation_run_id == run_id)
             .order_by(CalculationRunInput.entity_type, CalculationRunInput.entity_id))
     items, total = paginate(db, stmt, params, unique=False)
@@ -115,7 +118,9 @@ def get_run_inputs(run_id: uuid.UUID, params: PageParams = Depends(), current: C
 
 @router.get("/results/{result_id}", response_model=IndicatorResultOut)
 def get_result(result_id: uuid.UUID, current: CurrentUser = Depends(require("mrv.read")), db: Session = Depends(get_db)):
-    return with_scope_labels(db, [crud.get_or_404(db, IndicatorResult, result_id, "Result")])[0]
+    result = crud.get_or_404(db, IndicatorResult, result_id, "Result")
+    mrv.ensure_entity_access(current, result)
+    return with_scope_labels(db, [result])[0]
 
 
 @router.post("/results/{result_id}/submit-for-review", response_model=ReviewTaskOut)
@@ -142,7 +147,7 @@ def list_reviewers(current: CurrentUser = Depends(require("mrv.read")), db: Sess
 @router.get("/review-tasks", response_model=Page[ReviewTaskOut])
 def list_tasks(params: PageParams = Depends(), mine: bool = False, status: str | None = None, entity_type: str | None = None,
                current: CurrentUser = Depends(require("mrv.read")), db: Session = Depends(get_db)) -> dict:
-    stmt = select(ReviewTask).order_by(ReviewTask.created_at.desc())
+    stmt = select(ReviewTask).where(mrv.task_scope_condition(current)).order_by(ReviewTask.created_at.desc())
     if mine:
         stmt = stmt.where(or_(ReviewTask.assigned_reviewer_id == current.id, ReviewTask.submitted_by_id == current.id))
     if status:
@@ -154,6 +159,13 @@ def list_tasks(params: PageParams = Depends(), mine: bool = False, status: str |
     out = [ReviewTaskOut.model_validate(t).model_copy(update={
         "submitted_by_name": names.get(t.submitted_by_id), "reviewer_name": names.get(t.assigned_reviewer_id)}) for t in items]
     return {"items": out, "total": total, "page": params.page, "page_size": params.page_size}
+
+
+def _task(db: Session, task_id: uuid.UUID, current: CurrentUser) -> ReviewTask:
+    """Load a review task the current user may see (its record is in their area, or they submitted/are assigned it)."""
+    task = crud.get_or_404(db, ReviewTask, task_id, "Review task")
+    mrv.ensure_task_access(db, current, task)
+    return task
 
 
 def _detail(db: Session, task: ReviewTask, current: CurrentUser) -> ReviewTaskDetail:
@@ -188,13 +200,13 @@ def _detail(db: Session, task: ReviewTask, current: CurrentUser) -> ReviewTaskDe
 
 @router.get("/review-tasks/{task_id}", response_model=ReviewTaskDetail)
 def get_task(task_id: uuid.UUID, current: CurrentUser = Depends(require("mrv.read")), db: Session = Depends(get_db)):
-    return _detail(db, crud.get_or_404(db, ReviewTask, task_id, "Review task"), current)
+    return _detail(db, _task(db, task_id, current), current)
 
 
 @router.post("/review-tasks/{task_id}/comments", response_model=CommentOut, status_code=201)
 def add_comment(task_id: uuid.UUID, body: CommentIn, current: CurrentUser = Depends(require("mrv.read")),
                 db: Session = Depends(get_db)):
-    task = crud.get_or_404(db, ReviewTask, task_id, "Review task")
+    task = _task(db, task_id, current)
     if not (current.has("mrv.review") or current.id == task.submitted_by_id):
         raise AppError(403, "forbidden", "Only the submitter or reviewers can comment")
     comment = ReviewComment(review_task_id=task.id, author_id=current.id, comment=body.comment,
@@ -207,7 +219,7 @@ def add_comment(task_id: uuid.UUID, body: CommentIn, current: CurrentUser = Depe
 @router.post("/review-tasks/{task_id}/findings", response_model=FindingOut, status_code=201)
 def add_finding(task_id: uuid.UUID, body: FindingIn, current: CurrentUser = Depends(require("mrv.review")),
                 db: Session = Depends(get_db)):
-    task = crud.get_or_404(db, ReviewTask, task_id, "Review task")
+    task = _task(db, task_id, current)
     if task.status == "closed":
         raise AppError(422, "invalid_state", "Findings cannot be added to a closed task")
     finding = crud.create(db, current, VerificationFinding, {**body.model_dump(), "review_task_id": task.id,
@@ -221,7 +233,7 @@ def add_finding(task_id: uuid.UUID, body: FindingIn, current: CurrentUser = Depe
 def update_finding(finding_id: uuid.UUID, body: FindingUpdate, current: CurrentUser = Depends(require("mrv.read")),
                    db: Session = Depends(get_db)):
     finding = crud.get_or_404(db, VerificationFinding, finding_id, "Finding")
-    task = db.get(ReviewTask, finding.review_task_id) if finding.review_task_id else None
+    task = _task(db, finding.review_task_id, current) if finding.review_task_id else None
     submitter_id = task.submitted_by_id if task else None
     data = body.model_dump(exclude_unset=True)
     status = data.get("corrective_status")
@@ -242,7 +254,7 @@ def update_finding(finding_id: uuid.UUID, body: FindingUpdate, current: CurrentU
 @router.post("/review-tasks/{task_id}/request-correction", response_model=ReviewTaskOut)
 def request_correction(task_id: uuid.UUID, body: CorrectionIn, current: CurrentUser = Depends(require("mrv.review")),
                        db: Session = Depends(get_db)):
-    task = mrv.request_correction(db, current, crud.get_or_404(db, ReviewTask, task_id, "Review task"), body.note)
+    task = mrv.request_correction(db, current, _task(db, task_id, current), body.note)
     db.commit()
     return task
 
@@ -250,7 +262,7 @@ def request_correction(task_id: uuid.UUID, body: CorrectionIn, current: CurrentU
 @router.post("/review-tasks/{task_id}/resubmit", response_model=ReviewTaskOut)
 def resubmit(task_id: uuid.UUID, body: SubmitForReviewIn, current: CurrentUser = Depends(require("mrv.read")),
              db: Session = Depends(get_db)):
-    task = crud.get_or_404(db, ReviewTask, task_id, "Review task")
+    task = _task(db, task_id, current)
     # Resubmitting needs the same permission as the original submission for this kind of record
     current.require(SUBMIT_PERMISSION.get(task.entity_type, "mrv.calculate"))
     if task.status != "correction_requested":
@@ -264,7 +276,7 @@ def resubmit(task_id: uuid.UUID, body: SubmitForReviewIn, current: CurrentUser =
 @router.post("/review-tasks/{task_id}/mark-reviewed", response_model=ReviewTaskOut)
 def mark_reviewed(task_id: uuid.UUID, body: NoteIn, current: CurrentUser = Depends(require("mrv.review")),
                   db: Session = Depends(get_db)):
-    task = mrv.mark_reviewed(db, current, crud.get_or_404(db, ReviewTask, task_id, "Review task"), body.note)
+    task = mrv.mark_reviewed(db, current, _task(db, task_id, current), body.note)
     db.commit()
     return task
 
@@ -272,7 +284,7 @@ def mark_reviewed(task_id: uuid.UUID, body: NoteIn, current: CurrentUser = Depen
 @router.post("/review-tasks/{task_id}/decision", response_model=DecisionOut, status_code=201)
 def record_decision(task_id: uuid.UUID, body: DecisionIn, current: CurrentUser = Depends(require("mrv.verify")),
                     db: Session = Depends(get_db)):
-    decision = mrv.decide(db, current, crud.get_or_404(db, ReviewTask, task_id, "Review task"), body.decision, body.rationale)
+    decision = mrv.decide(db, current, _task(db, task_id, current), body.decision, body.rationale)
     db.commit()
     return DecisionOut.model_validate(decision).model_copy(update={"decider_name": current.user.full_name})
 
@@ -282,7 +294,7 @@ HISTORY_TYPES = {"field_record", "monitoring_record", "baseline_record", "indica
                  "verification_sample"}
 # Record-level types whose history is limited to users with access to the record's geography/organisation
 SCOPED_HISTORY = {"field_record": FieldRecord, "monitoring_record": MonitoringRecord, "baseline_record": BaselineRecord,
-                  "practice_record": PracticeRecord, "device": Device}
+                  "practice_record": PracticeRecord, "device": Device, "indicator_result": IndicatorResult}
 
 
 @router.get("/entity-history/{entity_type}/{entity_id}")
@@ -295,8 +307,10 @@ def entity_history(entity_type: str, entity_id: uuid.UUID, current: CurrentUser 
         if entity_type not in HISTORY_TYPES or not (current.has("mrv.read") or current.has("module.read")):
             raise AppError(403, "forbidden", "You do not have access to this history")
     record = db.get(SCOPED_HISTORY[entity_type], entity_id) if entity_type in SCOPED_HISTORY else None
-    if record is not None and (record.geo_unit_id or record.organisation_id):
-        current.ensure_access(record.geo_unit_id, record.organisation_id)
+    if record is not None:
+        geo, org = mrv.entity_location(record)
+        if geo or org or entity_type == "indicator_result":
+            mrv.ensure_entity_access(current, record)
     events = db.scalars(select(AuditEvent).where(AuditEvent.entity_type == entity_type,
                                                  AuditEvent.entity_id == str(entity_id)).order_by(AuditEvent.occurred_at))
     return [{"occurred_at": e.occurred_at, "action": e.action, "actor_email": e.actor_email, "summary": e.summary,

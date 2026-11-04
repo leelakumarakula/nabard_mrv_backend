@@ -3,6 +3,8 @@ from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+DEVELOPMENT_ENVIRONMENTS = {"local", "development", "test"}
+
 
 class Settings(BaseSettings):
     """Application settings, read from environment variables or the .env file."""
@@ -10,7 +12,8 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     app_name: str = "Coffee Climate Resilience MRV API"
-    app_env: str = "local"
+    # Defaults to production so a deployment that forgets APP_ENV never runs with development behaviour.
+    app_env: str = "production"
     api_v1_prefix: str = "/api/v1"
     database_url: str
     test_database_url: str | None = None
@@ -28,6 +31,11 @@ class Settings(BaseSettings):
     @property
     def is_production(self) -> bool:
         return self.app_env.lower() == "production"
+
+    @property
+    def is_development(self) -> bool:
+        """Only these explicitly named environments get development conveniences (e.g. reset tokens in responses)."""
+        return self.app_env.lower() in DEVELOPMENT_ENVIRONMENTS
 
     @property
     def storage_path(self) -> Path:

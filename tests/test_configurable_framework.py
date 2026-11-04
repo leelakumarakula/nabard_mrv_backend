@@ -12,24 +12,26 @@ def _farmer(db, consent="given"):
 
 # 1. sixth state + decisions register ----------------------------------------------------------------------------------
 
-def test_sixth_state_flagged_and_decision_register(api, db) -> None:
+def test_sixth_state_is_odisha_and_decision_register(api, db) -> None:
     pa = api.as_("programme_admin")
     states = {g["name"]: g for g in pa.get("/geo-units", params={"unit_type": "state"}).json()}
-    assert states["Meghalaya"]["requires_confirmation"] is True and "Odisha" in states["Meghalaya"]["confirmation_note"]
-    assert states["Andhra Pradesh"]["requires_confirmation"] is False
+    assert "Odisha" in states and "Meghalaya" not in states
+    assert not any(s["requires_confirmation"] for s in states.values())
     decisions = {d["code"]: d for d in pa.get("/programme-decisions").json()}
-    assert decisions["SIXTH_STATE"]["status"] == "pending" and "Meghalaya" in decisions["SIXTH_STATE"]["provisional_treatment"]
-    assert {"INDICATOR_DEFINITIONS", "BENEFICIARY_CATEGORIES", "NABARD_TEMPLATES", "VERIFICATION_METHOD"} <= set(decisions)
     sixth = decisions["SIXTH_STATE"]
-    assert pa.patch(f"/programme-decisions/{sixth['id']}", json={"status": "decided"}).status_code == 422
-    assert api.as_("field").patch(f"/programme-decisions/{sixth['id']}", json={"owner": "x"}).status_code == 403
-    done = pa.patch(f"/programme-decisions/{sixth['id']}", json={
-        "status": "decided", "decision": "Meghalaya confirmed", "decided_by": "Programme owner", "decided_on": "2026-11-05"})
+    assert sixth["status"] == "decided" and "Odisha" in sixth["decision"] and sixth["decided_on"] == "2026-10-29"
+    assert {"INDICATOR_DEFINITIONS", "BENEFICIARY_CATEGORIES", "NABARD_TEMPLATES", "VERIFICATION_METHOD"} <= set(decisions)
+    pending = [d for d in decisions.values() if d["status"] == "pending"]
+    master = decisions["MASTER_LISTS"]
+    assert pa.patch(f"/programme-decisions/{master['id']}", json={"status": "decided"}).status_code == 422
+    assert api.as_("field").patch(f"/programme-decisions/{master['id']}", json={"owner": "x"}).status_code == 403
+    done = pa.patch(f"/programme-decisions/{master['id']}", json={
+        "status": "decided", "decision": "Lists supplied", "decided_by": "Programme owner", "decided_on": "2026-11-05"})
     assert done.json()["status"] == "decided"
-    # States stay configurable: the flag can be cleared without code changes
-    assert pa.patch(f"/geo-units/{states['Meghalaya']['id']}", json={"requires_confirmation": False}).status_code == 200
+    # States stay configurable: a state can be flagged for confirmation without code changes
+    assert pa.patch(f"/geo-units/{states['Odisha']['id']}", json={"requires_confirmation": True}).status_code == 200
     status = pa.get("/system/feature-status").json()
-    assert status["summary"]["pending_decisions"] == len(decisions) - 1
+    assert status["summary"]["pending_decisions"] == len(pending) - 1
     assert any(f["status"] == "awaiting_approval" and "NABARD" in f["feature"] for f in status["features"])
 
 
@@ -200,7 +202,7 @@ def test_report_templates_and_excel_pdf_exports(api, programme_id) -> None:
 def test_dashboard_breakdown_by_state_respects_scope(api) -> None:
     admin = api.as_("programme_admin").get("/dashboard/breakdown", params={"by": "state"}).json()
     names = {r["name"] for r in admin["rows"]}
-    assert len(names) == 6 and next(r for r in admin["rows"] if r["name"] == "Meghalaya")["requires_confirmation"] is True
+    assert len(names) == 6 and "Odisha" in names and not any(r["requires_confirmation"] for r in admin["rows"])
     assert {"WOMAN_BENEFICIARY", "TRIBAL_COMMUNITY"} <= {c["code"] for c in admin["categories"]}
     field = api.as_("field").get("/dashboard/breakdown", params={"by": "state"}).json()
     assert [r["name"] for r in field["rows"]] == ["Andhra Pradesh"]

@@ -11,7 +11,7 @@ Legend: **Implemented** – working and tested · **Configurable** – working; 
 | Area | Feature | Status | Notes |
 |---|---|---|---|
 | Programme | Programme versions, versioned targets (proposed/approved/revised), reporting periods | Implemented | No hard-coded targets |
-| Programme | State / district / cluster geography | Configurable | Meghalaya flagged *requires confirmation* (Odisha discrepancy) |
+| Programme | State / district / cluster geography | Configurable | Six states per the proposal: AP, Odisha, Nagaland, Arunachal Pradesh, Mizoram, Manipur; state-wise household/area targets (§5.1) |
 | Registry | Households, farmers, farms, plots, consent, enrolment | Implemented | Stable IDs, unique codes |
 | Inclusion | Beneficiary categories (woman beneficiary, tribal community, …) | Awaiting approval | Categories *proposed*; assigned manually with a recorded basis; never inferred |
 | Inclusion | Demographic data fields | Configurable | Defined in Programme configuration; sensitive fields need `farmer.read_sensitive` and consent |
@@ -37,7 +37,7 @@ Legend: **Implemented** – working and tested · **Configurable** – working; 
 
 | Code | Decision needed | Provisional treatment in the platform |
 |---|---|---|
-| SIXTH_STATE | Meghalaya (V2 text) or Odisha (V2 diagram)? | Meghalaya configured and flagged; state list configurable |
+| SIXTH_STATE | **Decided:** Odisha (proposal of 29 Oct 2026, §1 and §5.1) | Odisha configured; recorded as decided in the register |
 | MASTER_LISTS | District, cluster and FPO/grower-group lists | Geography/organisations configurable; demo placement synthetic |
 | INDICATOR_DEFINITIONS | Approved definitions, formulas, evidence and verification rules | Draft definitions; preview only; PROVISIONAL results in demo |
 | BENEFICIARY_CATEGORIES | Definitions of woman beneficiary and tribal community | Categories *proposed*; manual assignment only |
