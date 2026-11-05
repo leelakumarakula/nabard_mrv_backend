@@ -2,7 +2,8 @@
 
 * Mock adapters (mock_*) and sample adapters (sample_*) generate synthetic data and must be flagged is_mock.
 * Public-data adapters (Open-Meteo, NASA POWER, Sentinel-2) fetch real data from free services that need no key.
-* FarmFuture engines stay ``unconfigured_rest`` until their API documentation is supplied.
+* Live keyed adapters call a real authenticated API read-only (FarmFuture Water Balance Engine, token from settings).
+* Other FarmFuture engines stay ``unconfigured_rest`` until their API documentation is supplied.
 """
 
 import os
@@ -15,6 +16,7 @@ from sqlalchemy.orm import Session
 from app.core.errors import AppError
 from app.models import Device, FarmPlot, IntegrationSource, Programme
 from app.services.integration.base import PageResult, TransientSourceError, with_retry
+from app.services.integration.farmfuture import FarmFutureWaterEngineAdapter
 from app.services.integration.platform_adapters import (
     NasaPowerAdapter,
     OpenMeteoAdapter,
@@ -137,10 +139,12 @@ ADAPTERS: dict[str, type | None] = {
     "sample_pest_engine": SamplePestEngineAdapter,
     "sample_water_engine": SampleWaterEngineAdapter,
     "sample_iot_gateway": SampleIotGatewayAdapter,
+    "farmfuture_water_engine": FarmFutureWaterEngineAdapter,
 }
 SYNTHETIC_ADAPTERS = {"mock_water_meter", "mock_iot_gateway", "sample_climate_engine", "sample_pest_engine",
                       "sample_water_engine", "sample_iot_gateway"}
 PUBLIC_DATA_ADAPTERS = {"open_meteo_weather", "nasa_power_weather", "sentinel2_ndvi"}
+LIVE_KEYED_ADAPTERS = {"farmfuture_water_engine"}
 
 
 def requires_mock_flag(adapter_code: str) -> bool | None:
@@ -148,7 +152,7 @@ def requires_mock_flag(adapter_code: str) -> bool | None:
     None when the flag is the operator's choice."""
     if adapter_code in SYNTHETIC_ADAPTERS:
         return True
-    if adapter_code in PUBLIC_DATA_ADAPTERS:
+    if adapter_code in PUBLIC_DATA_ADAPTERS or adapter_code in LIVE_KEYED_ADAPTERS:
         return False
     return None
 

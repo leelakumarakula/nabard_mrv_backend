@@ -9,7 +9,7 @@ from app.schemas.common import ORMModel
 PayloadKind = Literal["measurements", "observations", "advisories"]
 AdapterCode = Literal["push_only", "unconfigured_rest", "mock_water_meter", "mock_iot_gateway", "open_meteo_weather",
                       "nasa_power_weather", "sentinel2_ndvi", "sample_climate_engine", "sample_pest_engine",
-                      "sample_water_engine", "sample_iot_gateway"]
+                      "sample_water_engine", "sample_iot_gateway", "farmfuture_water_engine"]
 
 
 class SourceIn(BaseModel):
@@ -30,6 +30,7 @@ class SourceIn(BaseModel):
 class SourceUpdate(BaseModel):
     name: str | None = None
     module_code: str | None = None
+    source_type: Literal["rest_push", "rest_pull", "file_exchange"] | None = None
     adapter_code: AdapterCode | None = None
     base_url_env_var: str | None = Field(default=None, pattern=r"^[A-Z0-9_]+$")
     auth_type: Literal["api_key", "oauth2", "basic", "none"] | None = None
@@ -151,6 +152,24 @@ class IdentityMapIn(BaseModel):
     source_id: str = Field(min_length=1, max_length=120)
     internal_id: uuid.UUID
     review_note: str | None = None
+
+
+class FarmImportIn(BaseModel):
+    """Where imported FarmFuture estates are placed: FarmFuture has no programme geography or FPO membership."""
+    geo_unit_id: uuid.UUID
+    primary_fpo_id: uuid.UUID | None = None
+    test_label: bool = True  # prefix names with "TEST –" (not programme beneficiaries)
+
+
+class FarmImportOut(BaseModel):
+    estates: int
+    farmers_created: int
+    farms: int
+    farms_created: int
+    already_imported: int
+    with_location: int
+    with_area: int
+    skipped: list[str]
 
 
 class IdentityMapOut(ORMModel):

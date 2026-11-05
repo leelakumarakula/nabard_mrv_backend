@@ -30,7 +30,8 @@ Legend: **Implemented** – working and tested · **Configurable** – working; 
 | Integrations | Adapters, mappings, identity maps, quarantine, replay, mock adapters | Implemented | |
 | Integrations | Real public data: Open-Meteo weather + forecast, NASA POWER weather, Sentinel-2 NDVI (Planetary Computer) | Implemented | Free services, no key; gridded estimates and forecasts are labelled as such – not station or IMD data |
 | Integrations | SAMPLE connectors standing in for the FarmFuture Climate, Pest and Water engines and the IoT gateway | Implemented | Synthetic data, source must be is_mock, records flagged DEMO; replace when the APIs are supplied |
-| Integrations | Live FarmFuture / IMD / IoT feeds | Awaiting approval | No live data until contracts and access are confirmed |
+| Integrations | FarmFuture Water Balance Engine (Workstream 2) | Implemented – test access | Live read-only pull (`farmfuture_water_engine`): daily water account and irrigation plan per identity-mapped farm, stored as *calculated* water-balance records. Tested with a 7-day test token; production needs a FarmFuture partner account |
+| Integrations | Other live FarmFuture / IMD / IoT feeds | Awaiting approval | No live data until contracts and access are confirmed |
 | Platform | Data-consistency checker (`python -m app.services.integrity`) | Implemented | 12 read-only checks; run before reporting |
 | Platform | Sign-in lockout, upload virus scanning, outbound SMS/email | Not started | Lockout awaits a policy decision |
 | Platform | Farm map (OpenStreetMap): located plots coloured by practice progress, risk, NDVI or forecast rain | Implemented | Points rounded to ~1 km without farmer.read_pii; no plot boundaries or licensed layers yet |

@@ -23,6 +23,9 @@ class Settings(BaseSettings):
     cors_origins: str = "http://localhost:4200"
     storage_dir: str = "storage"
     max_upload_mb: int = 20
+    # FarmFuture API (read-only pulls). The token is a secret: environment / .env only, never the database or logs.
+    farmfuture_api_base_url: str = "https://api.farmfuture.io"
+    farmfuture_api_token: str | None = None
 
     @property
     def cors_origin_list(self) -> list[str]:

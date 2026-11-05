@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, Header, Request
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.core.deps import CurrentUser, get_current_user, oauth2_scheme, require
 from app.core.errors import AppError, Conflict
 from app.core.security import generate_token, hash_token
@@ -24,6 +25,8 @@ from app.schemas.common import Message, Page, PageParams, page_of, paginate
 from app.schemas.integration import (
     BatchResultOut,
     DiscardIn,
+    FarmImportIn,
+    FarmImportOut,
     IdentityMapIn,
     IdentityMapOut,
     InboundBatch,
@@ -41,12 +44,14 @@ from app.schemas.integration import (
 )
 from app.services import audit, crud
 from app.services.integration.adapters import (
+    LIVE_KEYED_ADAPTERS,
     TransientSourceError,
     catalogue,
     get_adapter,
     requires_mock_flag,
     with_retry,
 )
+from app.services.integration.farmfuture import import_farms
 from app.services.integration.pipeline import process_batch
 
 router = APIRouter(prefix="/integrations", tags=["integrations"])
@@ -70,6 +75,9 @@ def _source_out(db: Session, source: IntegrationSource) -> SourceOut:
         status = "not_configured – awaiting source API specification"
     elif source.is_mock:
         status = "MOCK adapter – synthetic data, not a live integration"
+    elif source.adapter_code in LIVE_KEYED_ADAPTERS:
+        status = ("LIVE FarmFuture API (read-only) – runs when you pull" if get_settings().farmfuture_api_token
+                  else "not_configured – FARMFUTURE_API_TOKEN is not set on the server")
     elif requires_mock_flag(source.adapter_code) is False:
         status = "LIVE public data service (no key) – runs when you pull"
     elif source.source_type == "rest_push":
@@ -253,6 +261,16 @@ def map_plot(source_code: str, body: PlotMapIn, current: CurrentUser = Depends(r
                       IdentityMapIn(entity_type="farm_plot", source_id=body.source_plot_id, internal_id=body.farm_plot_id))
     db.commit()
     return Message(message=f"Mapped source plot '{body.source_plot_id}'")
+
+
+@router.post("/sources/{source_code}/import-farms", response_model=FarmImportOut)
+def import_source_farms(source_code: str, body: FarmImportIn, current: CurrentUser = Depends(require("integration.manage")),
+                        db: Session = Depends(get_db)) -> dict:
+    """Create farmers, farms and plots (with identity maps) from the FarmFuture estates the token can see. Read-only on
+    the FarmFuture side; imported farmers have no recorded consent and no enrolment."""
+    if not current.has("farmer.manage"):
+        raise AppError(403, "forbidden", "Importing farms also needs the farmer.manage permission")
+    return import_farms(db, current, _source(db, source_code), body.geo_unit_id, body.primary_fpo_id, body.test_label)
 
 
 @router.post("/{source_code}/pull", response_model=BatchResultOut)
