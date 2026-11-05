@@ -17,6 +17,8 @@ PROGRAMME = "CCRL-INCLUSIVE"
 FARM_A = "11111111-1111-4111-8111-111111111111"  # mapped
 FARM_B = "22222222-2222-4222-8222-222222222222"  # visible to the token but not mapped
 ESTATE = "33333333-3333-4333-8333-333333333333"
+RING = [[75.3920, 13.3595], [75.3938, 13.3595], [75.3938, 13.3610], [75.3920, 13.3610]]  # open ring, [lon, lat]
+BLOCK = [[75.3920, 13.3595], [75.3929, 13.3595], [75.3929, 13.3610], [75.3920, 13.3595]]
 
 
 def plan(farm_id: str, day: str, status: str = "IRRIGATE_BY") -> dict:
@@ -57,7 +59,10 @@ def farmfuture(monkeypatch):
                     {"farmId": FARM_A, "farmName": "Upper block"}, {"farmId": FARM_B, "farmName": "Lower block"}]}]})
         if request.url.path.startswith("/api/FarmProfile/"):
             if request.url.path.endswith(FARM_A):
-                return httpx.Response(200, json={"center": [75.392909, 13.360239], "crop_type": "robusta"})
+                return httpx.Response(200, json={
+                    "center": [75.392909, 13.360239], "crop_type": "robusta", "ring": RING,
+                    "zone_profiles": [{"ring": RING}, {"ring": BLOCK}],
+                    "summary": {"terrain": {"elevation_mean_m": 739.0, "slope_mean_deg": 6.52, "slope_class": "gentle"}}})
             return httpx.Response(404, json={"detail": "No profile"})
         farm_id = request.url.path.split("/")[4]
         if "day" not in request.url.params:  # latest plan
@@ -176,3 +181,27 @@ def test_import_needs_farmer_permission(api, db, farmfuture) -> None:
     geo = db.scalars(select(GeoUnit).where(GeoUnit.unit_type == "cluster")).first()
     r = api.as_("analyst").post(f"/integrations/sources/{code}/import-farms", json={"geo_unit_id": str(geo.id)})
     assert r.status_code == 403
+
+
+def test_farm_boundary_is_read_live_and_needs_precise_location(api, db, farmfuture, monkeypatch) -> None:
+    code = _register(api)
+    geo = db.scalars(select(GeoUnit).where(GeoUnit.unit_type == "cluster").order_by(GeoUnit.code)).first()
+    assert api.as_("admin").post(f"/integrations/sources/{code}/import-farms", json={"geo_unit_id": str(geo.id)}).status_code == 200
+    plot_a = db.scalar(select(FarmPlot.id).where(FarmPlot.plot_code == "FF-11111111-P1"))
+    plot_b = db.scalar(select(FarmPlot.id).where(FarmPlot.plot_code == "FF-22222222-P1"))
+    farmfuture["requests"].clear()
+
+    out = api.as_("admin").get(f"/map/plots/{plot_a}/boundary").json()
+    assert out["available"] is True and out["source"] == "FarmFuture"
+    assert out["boundary"] == [*RING, RING[0]]  # closed for GeoJSON
+    assert out["blocks"] == [BLOCK]  # the zone that repeats the whole outline is not drawn twice
+    assert out["terrain"]["slope_class"] == "gentle"
+    assert [r.method for r in farmfuture["requests"]] == ["GET"]
+    assert db.scalar(select(FieldRecord.id).where(FieldRecord.farm_plot_id == plot_a)) is None  # nothing stored
+
+    assert api.as_("admin").get(f"/map/plots/{plot_b}/boundary").json() == {"available": False, "reason": "no_profile"}
+    demo_plot = db.scalars(select(FarmPlot.id).where(FarmPlot.is_demo == true()).order_by(FarmPlot.plot_code)).first()
+    assert api.as_("admin").get(f"/map/plots/{demo_plot}/boundary").json()["reason"] == "not_linked"
+    assert api.as_("analyst").get(f"/map/plots/{plot_a}/boundary").status_code == 403  # no precise-location permission
+    monkeypatch.setattr(get_settings(), "farmfuture_api_token", None)
+    assert api.as_("admin").get(f"/map/plots/{plot_a}/boundary").json()["reason"] == "not_configured"

@@ -34,7 +34,7 @@ Legend: **Implemented** – working and tested · **Configurable** – working; 
 | Integrations | Other live FarmFuture / IMD / IoT feeds | Awaiting approval | No live data until contracts and access are confirmed |
 | Platform | Data-consistency checker (`python -m app.services.integrity`) | Implemented | 12 read-only checks; run before reporting |
 | Platform | Sign-in lockout, upload virus scanning, outbound SMS/email | Not started | Lockout awaits a policy decision |
-| Platform | Farm map (OpenStreetMap): located plots coloured by practice progress, risk, NDVI or forecast rain | Implemented | Points rounded to ~1 km without farmer.read_pii; no plot boundaries or licensed layers yet |
+| Platform | Farm map (MapLibre): located plots coloured by practice progress, risk, NDVI or forecast rain; 2D / 3D terrain, rotation, streets / satellite / relief, 3D columns; real farm outline for FarmFuture plots | Implemented | Points rounded to ~1 km without farmer.read_pii; outlines need farmer.read_pii and are read live from FarmFuture, never stored. Open layers only (OSM, AWS Terrain Tiles, Sentinel-2 cloudless 2016 by EOX, CC BY 4.0) – no licensed high-resolution imagery |
 | Platform | Offline field mode, plot boundaries / licensed geospatial layers | Not started | Needs confirmed requirements and licensed datasets |
 
 ## Pending programme-owner decisions

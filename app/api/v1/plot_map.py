@@ -11,8 +11,10 @@ from sqlalchemy import false, func, select
 from sqlalchemy.orm import Session
 
 from app.core.deps import CurrentUser, require
+from app.core.errors import AppError
 from app.db.session import get_db
 from app.models import Farm, Farmer, FarmPlot, FieldRecord, PracticeRecord, ProgrammeParticipation
+from app.services.integration.farmfuture import farm_boundary
 from app.services.integration.platform_adapters import today_ist
 from app.services.scope import apply_scope
 
@@ -114,3 +116,18 @@ def map_plots(programme_id: uuid.UUID | None = None,
             "is_demo": plot.is_demo, "practice_stage": stage, "practices": dict(counts), **latest.get(plot.id, {}),
         })
     return {"precise_locations": precise, "total": total, "truncated": total > len(plots), "plots": plots}
+
+
+@router.get("/plots/{plot_id}/boundary")
+def plot_boundary(plot_id: uuid.UUID,
+                  current: CurrentUser = Depends(require("farmer.read", "module.read", "farmer.read_pii")),
+                  db: Session = Depends(get_db)) -> dict[str, Any]:
+    """Real farm outline for one plot, read live from FarmFuture. An exact outline is a precise location, so it needs
+    farmer.read_pii like exact map points; it is not stored on the platform."""
+    row = db.execute(select(FarmPlot.id, Farmer.geo_unit_id, Farmer.primary_fpo_id)
+                     .join(Farm, Farm.id == FarmPlot.farm_id).join(Farmer, Farmer.id == Farm.farmer_id)
+                     .where(FarmPlot.id == plot_id, FarmPlot.is_archived == false())).first()
+    if row is None:
+        raise AppError(404, "not_found", "Plot not found")
+    current.ensure_access(row.geo_unit_id, row.primary_fpo_id)
+    return farm_boundary(db, plot_id)

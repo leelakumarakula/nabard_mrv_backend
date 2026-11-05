@@ -4,7 +4,8 @@ Only HTTP GET is ever sent to the FarmFuture API:
   GET /v1/farmer/farms                                                  farms with a water-engine plan
   GET /v1/farmer/farms/{farm_id}/irrigation-plan?day=&horizon_days=     the engine's daily root-zone water account
   GET /api/Estate/GetUserEstatesAndFarmsList                            estates and farms (farm import)
-  GET /api/FarmProfile/{farm_id}                                        farm location and crop (farm import)
+  GET /api/FarmProfile/{farm_id}                                        farm location and crop (farm import); farm
+                                                                        outline for the map (shown live, never stored)
 
 The token comes from settings (FARMFUTURE_API_TOKEN in the environment / .env) and is never stored or logged.
 Each FarmFuture farm is fetched only when a reviewed identity map links it to a platform plot (entity farm_plot,
@@ -18,7 +19,7 @@ from decimal import Decimal
 from typing import Any, ClassVar
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import select, true
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
@@ -273,3 +274,61 @@ def import_farms(db: Session, current: CurrentUser, source: IntegrationSource, g
                  after={k: v for k, v in summary.items() if k != "skipped"})
     db.commit()
     return summary
+
+
+def _ring(value: Any) -> list[list[float]] | None:
+    """A FarmFuture ring ([[lon, lat], ...], GeoJSON order) as a closed GeoJSON ring, or None if it is not a polygon."""
+    if not isinstance(value, list):
+        return None
+    points: list[list[float]] = []
+    for point in value:
+        if not (isinstance(point, (list, tuple)) and len(point) >= 2 and all(isinstance(c, (int, float)) for c in point[:2])):
+            return None
+        lon, lat = float(point[0]), float(point[1])
+        if not (-180 <= lon <= 180 and -90 <= lat <= 90):
+            return None
+        points.append([lon, lat])
+    if len(points) < 3:
+        return None
+    return points if points[0] == points[-1] else [*points, points[0]]
+
+
+def farm_boundary(db: Session, plot_id: uuid.UUID) -> dict[str, Any]:
+    """Outline of the FarmFuture farm linked to a platform plot, fetched live for display and never stored.
+
+    Returns {"available": False, "reason": ...} when the plot is not a FarmFuture farm, the token is not set, or the
+    farm has no drawn boundary – the map then keeps showing the GPS point only.
+    """
+    row = db.execute(
+        select(SourceRecordMap.source_record_id, IntegrationSource)
+        .join(IntegrationSource, IntegrationSource.id == SourceRecordMap.source_id)
+        .where(SourceRecordMap.entity_type == "farm_plot", SourceRecordMap.internal_record_id == plot_id,
+               IntegrationSource.adapter_code == "farmfuture_water_engine", IntegrationSource.enabled == true())
+        .order_by(SourceRecordMap.first_seen_at)).first()
+    if row is None:
+        return {"available": False, "reason": "not_linked"}
+    farm_id, source = row
+    try:
+        adapter = FarmFutureWaterEngineAdapter(db, source)
+    except AppError:
+        return {"available": False, "reason": "not_configured"}
+    try:
+        with adapter.client() as client:
+            response = adapter._request(client, f"/api/FarmProfile/{farm_id}")
+    except TransientSourceError as exc:
+        raise AppError(502, "source_unavailable", f"FarmFuture is not reachable right now ({exc}); try again") from exc
+    if response.status_code == 404:
+        return {"available": False, "reason": "no_profile"}
+    if response.status_code >= 400:
+        raise AppError(502, "source_error", f"FarmFuture farm profile failed (HTTP {response.status_code})")
+    profile = response.json() or {}
+    outline = _ring(profile.get("ring"))
+    if outline is None:
+        return {"available": False, "reason": "no_boundary"}
+    blocks = [ring for zone in profile.get("zone_profiles") or [] if (ring := _ring(zone.get("ring"))) and ring != outline]
+    terrain = _get(profile, "summary", "terrain") or {}
+    return {
+        "available": True, "reason": None, "source": "FarmFuture", "boundary": outline, "blocks": blocks,
+        "terrain": {key: terrain.get(key) for key in
+                    ("elevation_mean_m", "elevation_min_m", "elevation_max_m", "slope_mean_deg", "slope_class", "aspect")},
+    }
