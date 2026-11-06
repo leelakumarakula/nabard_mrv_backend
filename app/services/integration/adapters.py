@@ -5,6 +5,8 @@
 * Live keyed adapters call a real authenticated API read-only with the token from settings: FarmFuture Water Balance
   Engine, soil & microclimate sensors, pest & disease scouting, satellite block greenness, farm advisories and on-farm
   weather & forecast.
+* Platform calculations (rainfall status) read the platform's own stored records and write results through the same
+  pipeline; they call no external service.
 * Any other source stays ``unconfigured_rest`` until its API documentation is supplied.
 """
 
@@ -35,6 +37,7 @@ from app.services.integration.platform_adapters import (
     SampleWaterEngineAdapter,
     Sentinel2NdviAdapter,
 )
+from app.services.integration.platform_calculations import RainfallStatusAdapter
 
 __all__ = ["ADAPTERS", "PageResult", "TransientSourceError", "catalogue", "get_adapter", "requires_mock_flag",
            "uses_platform_codes", "with_retry"]
@@ -154,12 +157,14 @@ ADAPTERS: dict[str, type | None] = {
     "farmfuture_satellite": FarmFutureSatelliteAdapter,
     "farmfuture_advisories": FarmFutureAdvisoryAdapter,
     "farmfuture_weather": FarmFutureWeatherAdapter,
+    "platform_rainfall_status": RainfallStatusAdapter,
 }
 SYNTHETIC_ADAPTERS = {"mock_water_meter", "mock_iot_gateway", "sample_climate_engine", "sample_pest_engine",
                       "sample_water_engine", "sample_iot_gateway"}
 PUBLIC_DATA_ADAPTERS = {"open_meteo_weather", "nasa_power_weather", "sentinel2_ndvi"}
 LIVE_KEYED_ADAPTERS = {"farmfuture_water_engine", "farmfuture_soil_microclimate", "farmfuture_pest_scouting",
                        "farmfuture_satellite", "farmfuture_advisories", "farmfuture_weather"}
+PLATFORM_CALCULATION_ADAPTERS = {"platform_rainfall_status"}
 
 
 def requires_mock_flag(adapter_code: str) -> bool | None:
@@ -167,7 +172,7 @@ def requires_mock_flag(adapter_code: str) -> bool | None:
     None when the flag is the operator's choice."""
     if adapter_code in SYNTHETIC_ADAPTERS:
         return True
-    if adapter_code in PUBLIC_DATA_ADAPTERS or adapter_code in LIVE_KEYED_ADAPTERS:
+    if adapter_code in PUBLIC_DATA_ADAPTERS | LIVE_KEYED_ADAPTERS | PLATFORM_CALCULATION_ADAPTERS:
         return False
     return None
 

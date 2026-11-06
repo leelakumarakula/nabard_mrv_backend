@@ -26,6 +26,13 @@ PESTS = ["white_stem_borer", "coffee_berry_borer", "leaf_rust", "black_rot", "me
 SENSOR_PARAMETERS = ["soil_moisture", "soil_temperature", "air_temperature", "humidity", "rainfall", "ph", "ec",
                      "nitrogen", "phosphorus", "potassium", "air_pressure", "wind_speed", "leaf_wetness", "light_intensity"]
 SENSOR_UNITS = ["%", "°C", "mm", "pH", "dS/m", "µS/cm", "mg/kg", "kg/ha", "hPa", "m/s", "lux", "raw"]
+MONTHS = [("jan", "January"), ("feb", "February"), ("mar", "March"), ("apr", "April"), ("may", "May"), ("jun", "June"),
+          ("jul", "July"), ("aug", "August"), ("sep", "September"), ("oct", "October"), ("nov", "November"),
+          ("dec", "December")]
+# Rainfall status bands, wettest first; thresholds come from the setting climate.rainfall_status_bands.
+RAINFALL_STATUSES = ["extra", "usual", "little_less", "much_less", "very_much_less"]
+# A status is only given when enough days were measured (setting climate.rainfall_status_min_coverage_pct).
+RAINFALL_STATUS_OPTIONS = [*RAINFALL_STATUSES, "insufficient_data"]
 # Processing series of a device reading: "app" = the values the device platform shows its users (FarmFuture's daily
 # statistics), "raw" = uncorrected sensor output, "calibrated" = device calibration applied, "lab_anchored" = scaled to
 # a laboratory soil test. Which series counts for reporting is a pending programme decision (FARMFUTURE_SENSOR_UNITS).
@@ -82,6 +89,7 @@ class RecordType:
     unit_field: str | None = None  # attribute holding the unit, or None to use the value field's fixed unit
     default_activity_code: str | None = None
     caution: str | None = None
+    long_term_baseline: bool = False  # describes a past multi-year period (e.g. 30-year normals): no recency check
     rules: list[Callable[[dict[str, Any]], str | None]] = field(default_factory=list)
 
 
@@ -198,6 +206,71 @@ RECORD_TYPES: list[RecordType] = [
         value_field="rainfall_mm",
         caution="A forecast is a prediction; record observed weather and farmer actions separately.",
         rules=[_date_order("issued_on", "forecast_date")],
+    ),
+    RecordType(
+        "climate_normals", "climate", "30-year climate normals",
+        "Long-term average climate of the plot location (e.g. 1996–2025) from a named gridded dataset: monthly and "
+        "annual rain, temperature and dry spells. The baseline that observed rain is compared with.",
+        "calculated",
+        [FieldSpec("source_name", "Source", "text", required=True),
+         FieldSpec("rainfall_dataset", "Rainfall dataset", "text", required=True),
+         FieldSpec("temperature_dataset", "Temperature dataset", "text"),
+         FieldSpec("period_start_year", "First year", "integer", required=True, min=1900, max=2100),
+         FieldSpec("period_end_year", "Last year", "integer", required=True, min=1900, max=2100),
+         FieldSpec("annual_rain_mm", "Average yearly rain", "number", unit="mm", required=True, min=0, max=15000),
+         FieldSpec("annual_rain_sd_mm", "Year-to-year variation (standard deviation)", "number", unit="mm", min=0),
+         FieldSpec("annual_rain_cv_pct", "Year-to-year variation (coefficient)", "number", unit="%", min=0),
+         *[FieldSpec(f"rain_{m}_mm", f"Average rain – {name}", "number", unit="mm", required=True, min=0, max=5000)
+           for m, name in MONTHS],
+         *[FieldSpec(f"rain_{m}_max_mm", f"Wettest {name} on record", "number", unit="mm", min=0, max=8000)
+           for m, name in MONTHS],
+         FieldSpec("monsoon_share_pct", "Share of yearly rain in June–September", "number", unit="%", min=0, max=100),
+         FieldSpec("mean_temp_c", "Average temperature", "number", unit="°C", min=-20, max=45),
+         FieldSpec("mean_min_temp_c", "Average daily minimum", "number", unit="°C", min=-30, max=45),
+         FieldSpec("mean_max_temp_c", "Average daily maximum", "number", unit="°C", min=-20, max=55),
+         FieldSpec("dry_day_threshold_mm", "Dry day = rain below", "number", unit="mm", min=0, max=10),
+         FieldSpec("dry_days_per_year", "Dry days per year", "number", unit="days", min=0, max=366),
+         FieldSpec("usual_longest_dry_spell_days", "Usual longest dry spell", "number", unit="days", min=0, max=366),
+         FieldSpec("longest_dry_spell_days", "Longest dry spell on record", "number", unit="days", min=0, max=366),
+         FieldSpec("longest_dry_spell_year", "Year of the longest dry spell", "integer", min=1900, max=2100)],
+        requires_plot=True, value_field="annual_rain_mm",
+        caution="A long-term average from a gridded dataset, not an observation at the farm.", long_term_baseline=True,
+        rules=[_not_more_than("period_start_year", "period_end_year", "The first year cannot be after the last year")],
+    ),
+    RecordType(
+        "rainfall_status", "climate", "Rainfall status vs 30-year normal",
+        "Rain measured at the farm's weather station compared with the 30-year normal for the same days – for the month "
+        "and for the year to date – and the resulting status band (extra rain … very much less rain).",
+        "calculated",
+        [FieldSpec("month", "Month", "text", required=True, help="YYYY-MM"),
+         FieldSpec("as_of_date", "Rain counted up to", "date", required=True),
+         FieldSpec("station_ref", "Rain station", "text"),
+         FieldSpec("month_rain_mm", "Rain this month", "number", unit="mm", min=0),
+         FieldSpec("month_normal_mm", "Usual rain for these days", "number", unit="mm", min=0),
+         FieldSpec("month_received_pct", "Month: share of usual rain", "number", unit="%", min=0),
+         FieldSpec("month_status", "Month status", "select", options=RAINFALL_STATUS_OPTIONS),
+         FieldSpec("month_coverage_pct", "Month: share of days measured", "number", unit="%", min=0, max=100),
+         FieldSpec("month_data_days", "Month: days with measured rain", "integer", min=0, max=31),
+         FieldSpec("month_days", "Month: days counted", "integer", min=0, max=31),
+         FieldSpec("month_above_record", "Month above the 30-year record", "boolean"),
+         FieldSpec("ytd_rain_mm", "Rain since 1 January", "number", unit="mm", required=True, min=0),
+         FieldSpec("ytd_normal_mm", "Usual rain since 1 January", "number", unit="mm", required=True, min=0),
+         FieldSpec("ytd_received_pct", "Year to date: share of usual rain", "number", unit="%", min=0),
+         FieldSpec("ytd_difference_mm", "Year to date: rain minus usual (negative = missing rain)", "number", unit="mm"),
+         FieldSpec("ytd_status", "Year-to-date status", "select", options=RAINFALL_STATUS_OPTIONS),
+         FieldSpec("ytd_coverage_pct", "Year to date: share of days measured", "number", unit="%", min=0, max=100),
+         FieldSpec("ytd_data_days", "Year to date: days with measured rain", "integer", min=0, max=366),
+         FieldSpec("ytd_days", "Year to date: days counted", "integer", min=0, max=366),
+         FieldSpec("normals_ref", "Normals record used", "text"),
+         FieldSpec("normals_dataset", "Normals dataset and period", "text"),
+         FieldSpec("method_version", "Method version", "text", required=True),
+         FieldSpec("bands_used", "Status bands used", "text"),
+         FieldSpec("min_coverage_pct", "Least share of days measured for a status", "number", unit="%", min=0, max=100)],
+        requires_plot=True, value_field="ytd_received_pct",
+        caution="Calculated by the platform from observed station rain and a gridded 30-year normal. Days without a "
+                "station reading count as missing, not as dry; with too few measured days the status is 'insufficient "
+                "data'. The bands and the coverage rule are provisional until the programme approves them "
+                "(RAINFALL_STATUS_BANDS).",
     ),
     # 2. Water
     RecordType(

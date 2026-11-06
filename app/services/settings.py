@@ -31,6 +31,18 @@ DEFAULT_SETTINGS: dict[str, tuple[Any, str]] = {
     "verification.visit_checklist": (
         [], "Independent verification visit checklist [{code, label, required}]. Empty until the verifier's methodology "
             "is approved."),
+    "climate.rainfall_status_bands": (
+        [{"code": "extra", "label": "Extra rain", "min_pct": 110},
+         {"code": "usual", "label": "Usual rain", "min_pct": 90},
+         {"code": "little_less", "label": "Little less rain", "min_pct": 75},
+         {"code": "much_less", "label": "Much less rain", "min_pct": 50},
+         {"code": "very_much_less", "label": "Very much less rain", "min_pct": 0}],
+        "Rainfall status bands: share of the 30-year normal for the same days (min_pct, wettest first). The defaults are "
+        "the bands the FarmFuture rain report uses; provisional until the programme approves them (RAINFALL_STATUS_BANDS)."),
+    "climate.rainfall_status_min_coverage_pct": (
+        80, "Least share of days with a station rain reading (%) for a rainfall status band; below it the status is "
+            "'insufficient data' (the rain figures are still shown). Provisional until the programme decides "
+            "(RAINFALL_STATUS_BANDS)."),
     "evidence.allowed_types": (
         ["image/jpeg", "image/png", "application/pdf", "text/csv"], "MIME types accepted for evidence uploads."),
 }

@@ -22,7 +22,7 @@ router = APIRouter(prefix="/map", tags=["map"])
 
 MAX_PLOTS = 2000
 LATEST_TYPES = ("weather_estimate", "weather_forecast", "vegetation_index", "pest_risk_estimate",
-                "climate_risk_assessment", "sensor_observation")
+                "climate_risk_assessment", "sensor_observation", "rainfall_status", "climate_observation")
 RISK_ORDER = {"low": 0, "moderate": 1, "high": 2, "very_high": 3}
 
 
@@ -76,9 +76,11 @@ def map_plots(programme_id: uuid.UUID | None = None,
         if rec.record_type in ("pest_risk_estimate", "climate_risk_assessment") and attrs.get("valid_to", "") < today.isoformat():
             continue  # expired risk estimates are history, not the current picture
         key = {"weather_estimate": "weather", "vegetation_index": "ndvi", "pest_risk_estimate": "pest_risk",
-               "climate_risk_assessment": "climate_risk"}.get(rec.record_type)
+               "climate_risk_assessment": "climate_risk", "rainfall_status": "rainfall"}.get(rec.record_type)
         if rec.record_type == "sensor_observation":
             key = "soil_moisture" if attrs.get("parameter") == "soil_moisture" else None
+        if rec.record_type == "climate_observation":  # the latest full station day (rain-only history days are skipped)
+            key = "station" if attrs.get("temp_max_c") is not None else None
         if key and key not in bucket:
             bucket[key] = _summary(rec)
         elif key in ("pest_risk", "climate_risk") and RISK_ORDER.get(attrs.get("risk_level"), -1) > \

@@ -28,7 +28,7 @@ from app.models import (
 )
 from app.services import mrv as mrv_service
 from app.services import reports_v2
-from app.services.record_types import MODULES
+from app.services.record_types import MODULES, RAINFALL_STATUSES
 from app.services.reports import Scope
 from app.services.scope import apply_scope
 
@@ -98,6 +98,34 @@ def breakdown(by: str = Query("state", pattern="^(state|district)$"), programme_
             "categories": [{"code": c.code, "name": c.name, "status": c.status} for c in categories]}
 
 
+def _rainfall_summary(db: Session, current: CurrentUser, programme: Programme) -> dict | None:
+    """Latest year-to-date rainfall status per plot (Workstream 1), counted by status band; None when not calculated."""
+    year_start = datetime(datetime.now(UTC).year, 1, 1, tzinfo=UTC)
+    stmt = apply_scope(select(FieldRecord).where(
+        FieldRecord.programme_id == programme.id, FieldRecord.record_type == "rainfall_status",
+        FieldRecord.validation_status == "valid", FieldRecord.observed_at >= year_start)
+        .order_by(FieldRecord.observed_at.desc()), current, FieldRecord.geo_unit_id, FieldRecord.organisation_id)
+    latest: dict[uuid.UUID, FieldRecord] = {}
+    for record in db.scalars(stmt).unique():
+        latest.setdefault(record.farm_plot_id, record)
+    if not latest:
+        return None
+    by_status: dict[str, int] = {}
+    for record in latest.values():
+        status = (record.attributes or {}).get("ytd_status") or "no_data"
+        by_status[status] = by_status.get(status, 0) + 1
+    # driest = lowest share of usual rain among plots with a status band (too few measured days is not "dry")
+    driest = sorted((r for r in latest.values() if (r.attributes or {}).get("ytd_status") in RAINFALL_STATUSES),
+                    key=lambda r: r.attributes["ytd_received_pct"])[:5]
+    return {"plots": len(latest), "as_of": max(r.attributes.get("as_of_date", "") for r in latest.values()),
+            "by_status": by_status,
+            "driest": [{"record_id": r.id, "plot_code": r.farm_plot.plot_code if r.farm_plot else None,
+                        "ytd_received_pct": r.attributes.get("ytd_received_pct"), "ytd_status": r.attributes.get("ytd_status"),
+                        "ytd_difference_mm": r.attributes.get("ytd_difference_mm"),
+                        "measured_days": f"{r.attributes.get('ytd_data_days')}/{r.attributes.get('ytd_days')}"}
+                       for r in driest]}
+
+
 @router.get("/system-info")
 def system_info(current: CurrentUser = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
     """Environment banner data: the UI shows a DEMO/SYNTHETIC notice whenever demo records exist."""
@@ -156,6 +184,8 @@ def dashboard(programme_id: uuid.UUID | None = None, current: CurrentUser = Depe
         exceptions = _count(db, apply_scope(select(FieldRecord.id).where(FieldRecord.validation_status.in_(["exception", "rejected"])),
                                             current, FieldRecord.geo_unit_id, FieldRecord.organisation_id))
         out.setdefault("data_quality", {})["workstream_exceptions"] = exceptions
+    if current.has("module.read") and programme:
+        out["rainfall"] = _rainfall_summary(db, current, programme)
     if current.has("monitoring.read"):
         dq = dict(db.execute(apply_scope(select(MonitoringRecord.validation_status, func.count())
                                          .group_by(MonitoringRecord.validation_status), current,

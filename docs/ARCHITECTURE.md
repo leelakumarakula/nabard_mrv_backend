@@ -110,6 +110,7 @@ status columns (submission / validation / review / verification), append-only `a
 | FarmFuture satellite (`farmfuture_satellite`) | **Live, read-only (GET)** – per-block NDVI / NDMI |
 | FarmFuture advisories (`farmfuture_advisories`) | **Live, read-only (GET)** – pest / disease / irrigation advisories (the FarmFuture API has no separate pest-prediction or climate-risk endpoint; its pest and disease warnings come from the advisory engine) |
 | FarmFuture weather (`farmfuture_weather`) | **Live, read-only (GET)** – MicroClime station days and the 5-day forecast → climate observations / forecasts |
+| Rainfall status (`platform_rainfall_status`) | **Platform calculation** – station rain vs 30-year normals per plot and month (`app/services/climate_status.py`); results go through the same pipeline as imports |
 | FarmFuture Climate Intelligence Engine (`climate_intelligence`) | Placeholder adapter – the FarmFuture API has no climate-risk endpoint; refuses to run until one is supplied |
 | FarmFuture Pest & Disease Prediction Engine (`pest_prediction`) | Placeholder adapter – superseded by `farmfuture_advisories` + `farmfuture_pest_scouting` unless a dedicated risk API is supplied |
 | Mock water meter (`mock_water_meter`) | **MOCK** – synthetic paginated payloads with retry, duplicate and bad record |

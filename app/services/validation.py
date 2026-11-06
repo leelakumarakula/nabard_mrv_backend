@@ -176,7 +176,7 @@ def validate_field_record(db: Session, rec: FieldRecord) -> Outcome:
     if rt.data_nature != "model_prediction" and rec.observed_at is None:
         out.errors.append("Observation/activity date-time is required")
     _check_plot_farmer(db, out, rec.farmer_id, rec.farm_plot_id)
-    if rt.data_nature != "model_prediction":
+    if rt.data_nature != "model_prediction" and not rt.long_term_baseline:
         _check_time(db, out, rec.programme_id, rec.observed_at)
     if rec.source_record_id and rec.source_system_id:
         dup = db.scalar(select(FieldRecord.id).where(

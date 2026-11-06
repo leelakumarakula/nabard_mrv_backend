@@ -86,6 +86,15 @@ DECISIONS = [
      "App advisories are recorded as sent only (not delivered or read), so they do not count towards reach; app scouting "
      "is imported as scouting records marked 'FarmFuture app scouting'.",
      ["Climate module", "Pest & disease module", "Indicators"]),
+    ("RAINFALL_STATUS_BANDS", "indicators", "Rainfall status bands and drought definition",
+     "Which bands classify rain against the 30-year normal (share of usual rain for the same days), which normal and "
+     "station data apply, how much missing station data is acceptable, and which status counts as a drought warning?",
+     "The platform calculates the share of usual rain per plot (month and year to date) from observed station rain and "
+     "FarmFuture's 30-year CHIRPS normals, with FarmFuture's bands: extra ≥110 %, usual 90–110 %, little less 75–90 %, "
+     "much less 50–75 %, very much less <50 % (setting climate.rainfall_status_bands). A band is given only when at least 80 % "
+     "of the days have a station reading (climate.rainfall_status_min_coverage_pct), otherwise 'insufficient data'; "
+     "measured days are shown with every result. No status is treated as a drought warning yet.",
+     ["Climate module", "Farm map", "Dashboard"]),
     ("FPO_REGISTRATION_GEOGRAPHY", "scope", "Geography of farmers registered by an FPO coordinator",
      "Must a farmer registered by an FPO/grower-group coordinator be located within that FPO's area?",
      "Allowed when the coordinator's FPO is the farmer's primary FPO; geography pickers offer the FPO's own area.",

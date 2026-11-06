@@ -57,6 +57,20 @@ def _forecast() -> dict:
             "city": {"name": "Madanahalli", "coord": {"lat": 13.3151, "lon": 76.1367}}}
 
 
+def _climate() -> dict:
+    """FarmFuture farm-profile climate (30-year normals) in the live shape; the location is never stored."""
+    months = [{"month": m, "month_name": "x", "mean_mm": 10.0 * m, "std_mm": 1.0, "min_mm": 0.0, "max_mm": 30.0 * m}
+              for m in range(1, 13)]
+    return {"farm_id": FARM_A, "lat": 12.0016, "lon": 76.0564,
+            "series": {"start_year": 1996, "end_year": 2025, "rainfall_source": "CHIRPS Daily v2.0",
+                       "temperature_source": "ERA5 via Open-Meteo"},
+            "annual_rainfall": {"mean_mm": 780.0, "std_mm": 120.5, "cv_pct": 15.4}, "monthly_rainfall": months,
+            "seasonal_rainfall": [{"season": "sw_monsoon", "pct_of_annual": 68.2}],
+            "dry_spell": {"threshold_mm": 1.0, "mean_max_annual_cdd": 67.3, "longest_cdd_on_record": 105,
+                          "longest_cdd_year": 2023, "mean_annual_dry_days": 257.6},
+            "annual_temperature": {"mean_c": 21.62, "mean_min_c": 18.43, "mean_max_c": 26.55}}
+
+
 def _advisory(run_date: str, generated: str, items: list[dict]) -> dict:
     return {"farmId": FARM_A, "runDate": run_date, "generatedAt": generated, "isStale": False, "items": items,
             "delivery": {"shown": [i["id"] for i in items], "more": []}}
@@ -83,6 +97,10 @@ def farmfuture(monkeypatch):
         if path == "/api/Estate/GetUserEstatesAndFarmsList":
             return ok([{"estateId": ESTATE, "estateName": "Hill Estate", "farms": [
                 {"farmId": FARM_A, "farmName": "Upper"}, {"farmId": FARM_B, "farmName": "Lower"}]}])
+        if path == f"/api/FarmProfile/{FARM_A}/climate":
+            return httpx.Response(200, json=_climate())
+        if path.endswith("/climate"):
+            return httpx.Response(404, json={"detail": "No climate profile"})
         if path.startswith("/api/FarmProfile/"):
             return httpx.Response(200, json={"center": [75.39, 13.36], "crop_type": "arabica"})
         if path.endswith("/irrigation-plan"):
@@ -295,8 +313,8 @@ def test_weather_station_days_and_forecast(api, db, farmfuture) -> None:
 
     weather = _register(api, "farmfuture_weather")
     run = api.as_("admin").post(f"/integrations/{weather}/pull").json()["sync_run"]
-    # FARM_A: 1 station day + 2 earlier rain days; FARM_A and FARM_B (both located): 1 whole forecast day each
-    assert (run["records_accepted"], run["records_rejected"]) == (5, 0), run
+    # FARM_A: 1 station day + 2 earlier rain days + 30-year normals; FARM_A and FARM_B (located): 1 forecast day each
+    assert (run["records_accepted"], run["records_rejected"]) == (6, 0), run
     assert {r.method for r in farmfuture["requests"]} == {"GET"}
     asked = farmfuture["weather_stats_params"]
     assert asked["macAddress"] == CLIME_MAC and asked["endDate"].startswith((today_ist() - timedelta(days=4)).isoformat())
@@ -306,8 +324,14 @@ def test_weather_station_days_and_forecast(api, db, farmfuture) -> None:
                      key=lambda r: r.observed_at)
     assert [r.attributes["rainfall_mm"] for r in history] == [12.5, 0.0]  # a missing day stays missing, never 0 mm
     assert history[0].observed_at.date() == today_ist() - timedelta(days=10) and history[0].device_id is not None
+    normals = next(r for r in records if r.record_type == "climate_normals")
+    n = normals.attributes
+    assert (normals.data_nature, normals.farm_plot_id, float(normals.value)) == ("calculated", plot.id, 780.0)
+    assert (n["rain_jan_mm"], n["rain_dec_mm"], n["rain_dec_max_mm"], n["period_end_year"]) == (10.0, 120.0, 360.0, 2025)
+    assert n["rainfall_dataset"] == "CHIRPS Daily v2.0" and "12.0016" not in json.dumps(n)  # no location stored
+    assert normals.validation_status == "valid"
     run = api.as_("admin").post(f"/integrations/{weather}/pull").json()["sync_run"]
-    assert (run["records_accepted"], run["records_duplicate"]) == (0, 3)  # history days already imported are not re-sent
+    assert (run["records_accepted"], run["records_duplicate"]) == (0, 4)  # history days already imported are not re-sent
     station = next(r for r in records if r.record_type == "climate_observation" and "temp_max_c" in r.attributes)
     assert station.module_code == "climate" and station.data_nature == "observed" and station.farm_plot_id == plot.id
     assert station.device_id == db.scalar(select(Device.id).where(Device.device_code == f"FF-{CLIME_MAC}"))

@@ -94,6 +94,12 @@ Live FarmFuture connectors (read-only GET calls with `FARMFUTURE_API_TOKEN`; Far
 
 Order: import farms on the water-engine source first; the other FarmFuture connectors reuse those farm links.
 
+Platform calculation (reads the platform's own records, calls no external service):
+
+| Connector | Data | Creates |
+|---|---|---|
+| `platform_rainfall_status` | Station rain since 1 January vs the plot's 30-year normal, per month (run after the FarmFuture weather source, which supplies the station rain and the normals) | `rainfall_status` |
+
 Nothing is fetched until someone clicks **Run pull** on the source. Located plot = a plot with latitude/longitude whose
 farmer is enrolled in the programme. These are not IMD data; IMD and the FarmFuture APIs need agreements and API
 documentation first. The **Farm map** (`/map`, API `GET /api/v1/map/plots`) shows located plots with the latest values;

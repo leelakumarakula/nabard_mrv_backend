@@ -32,7 +32,7 @@ from app.services import audit, crud
 from app.services.integration.base import PageResult, TransientSourceError
 from app.services.integration.farmfuture import FarmFutureApi
 from app.services.integration.platform_adapters import IST, PlatformAdapter, _int, _noon, today_ist
-from app.services.record_types import PESTS
+from app.services.record_types import MONTHS, PESTS
 
 FARMFUTURE_ADAPTERS = {"farmfuture_water_engine", "farmfuture_soil_microclimate", "farmfuture_pest_scouting",
                        "farmfuture_satellite", "farmfuture_advisories", "farmfuture_weather"}
@@ -355,6 +355,39 @@ def _summary(values: dict[str, Any], name: str, key: str) -> float | None:
     return _num(item.get(key), 2) if isinstance(item, dict) else None
 
 
+def climate_normals_attributes(body: dict[str, Any]) -> dict[str, Any] | None:
+    """FarmFuture farm-profile climate (30-year normals) → climate_normals attributes; None when incomplete."""
+    series = body.get("series") or {}
+    annual = body.get("annual_rainfall") or {}
+    months = {m.get("month"): m for m in body.get("monthly_rainfall") or [] if isinstance(m, dict)}
+    start, end = series.get("start_year"), series.get("end_year")
+    if not isinstance(start, int) or not isinstance(end, int) or len(months) != 12 or _num(annual.get("mean_mm")) is None:
+        return None
+    attributes: dict[str, Any] = {
+        "source_name": "FarmFuture farm climate profile", "rainfall_dataset": str(series.get("rainfall_source") or "")[:200]
+        or "not stated", "temperature_dataset": str(series.get("temperature_source") or "")[:200] or None,
+        "period_start_year": start, "period_end_year": end, "annual_rain_mm": _num(annual.get("mean_mm"), 1),
+        "annual_rain_sd_mm": _num(annual.get("std_mm"), 1), "annual_rain_cv_pct": _num(annual.get("cv_pct"), 1)}
+    for number, (key, _) in enumerate(MONTHS, start=1):
+        month = months.get(number) or {}
+        mean = _num(month.get("mean_mm"), 1)
+        if mean is None:
+            return None
+        attributes[f"rain_{key}_mm"] = mean
+        attributes[f"rain_{key}_max_mm"] = _num(month.get("max_mm"), 1)
+    monsoon = next((s for s in body.get("seasonal_rainfall") or [] if s.get("season") == "sw_monsoon"), {})
+    temperature = body.get("annual_temperature") or {}
+    dry = body.get("dry_spell") or {}
+    attributes.update({
+        "monsoon_share_pct": _num(monsoon.get("pct_of_annual"), 1), "mean_temp_c": _num(temperature.get("mean_c"), 1),
+        "mean_min_temp_c": _num(temperature.get("mean_min_c"), 1), "mean_max_temp_c": _num(temperature.get("mean_max_c"), 1),
+        "dry_day_threshold_mm": _num(dry.get("threshold_mm"), 1), "dry_days_per_year": _num(dry.get("mean_annual_dry_days"), 1),
+        "usual_longest_dry_spell_days": _num(dry.get("mean_max_annual_cdd"), 1),
+        "longest_dry_spell_days": _num(dry.get("longest_cdd_on_record"), 0),
+        "longest_dry_spell_year": dry.get("longest_cdd_year") if isinstance(dry.get("longest_cdd_year"), int) else None})
+    return attributes
+
+
 def forecast_days(body: dict[str, Any], today: date) -> list[dict[str, Any]]:
     """Daily rain total, max / min temperature and mean humidity from the 3-hourly FarmFuture forecast.
 
@@ -397,8 +430,11 @@ class FarmFutureWeatherAdapter(FarmFutureFarmAdapter):
                        "rain, maximum / minimum temperature, mean humidity) and FarmFuture's 5-day weather forecast for "
                        "each located farm (daily rain total, maximum / minimum temperature, mean humidity). "
                        "'rain_history_days' also fills in the station's daily rain for earlier days not yet imported "
-                       "(days without data stay missing, never zero). FarmFuture publishes no climate-risk API.",
-        "config": {"past_days": 3, "rain_history_days": 365, "station_observations": True, "forecast": True}}
+                       "(days without data stay missing, never zero), and 'climate_normals' imports each farm's 30-year "
+                       "climate normals (CHIRPS rain, ERA5 temperature) used for the rainfall status. FarmFuture "
+                       "publishes no climate-risk API.",
+        "config": {"past_days": 3, "rain_history_days": 365, "station_observations": True, "forecast": True,
+                   "climate_normals": True}}
 
     def __init__(self, db: Session, source: IntegrationSource) -> None:
         super().__init__(db, source)
@@ -421,7 +457,21 @@ class FarmFutureWeatherAdapter(FarmFutureFarmAdapter):
             records.extend(self._station_days(client, link))
         if self.config.get("forecast", True) and link.plot.latitude is not None and link.plot.longitude is not None:
             records.extend(self._forecast(client, link))
+        if self.config.get("climate_normals", True):
+            records.extend(self._normals(client, link))
         return records
+
+    def _normals(self, client: httpx.Client, link: FarmLink) -> list[dict[str, Any]]:
+        """The farm's 30-year climate normals (FarmFuture farm profile); the location itself is not stored."""
+        body = self.get_data(client, f"/api/FarmProfile/{link.farm_id}/climate")
+        if not isinstance(body, dict):
+            return []
+        attributes = climate_normals_attributes(body)
+        if attributes is None:
+            return []
+        end = attributes["period_end_year"]
+        return [self.observation(f"FF-NORM-{link.farm_id}-{attributes['period_start_year']}-{end}", "climate_normals",
+                                 link.plot, attributes, _noon(date(end, 12, 31)))]
 
     def _station_days(self, client: httpx.Client, link: FarmLink) -> list[dict[str, Any]]:
         end = today_ist() - timedelta(days=1)  # whole days only
