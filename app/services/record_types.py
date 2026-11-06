@@ -14,7 +14,7 @@ NATURE_LABELS: dict[str, str] = {
     "observed": "Observed / measured fact",
     "user_reported": "Reported by user (not independently observed)",
     "model_prediction": "Model prediction – risk estimate, not a confirmed field condition",
-    "calculated": "Calculated output from an external engine",
+    "calculated": "Calculated output (external engine or documented platform method)",
     "assessment": "Expert/technical assessment",
 }
 

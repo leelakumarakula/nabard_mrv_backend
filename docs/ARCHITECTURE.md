@@ -13,7 +13,7 @@ web client lives in the separate `mrv-frontend` repository.
 | Database | SQL Server via SQLAlchemy 2 + Alembic migrations (upgrade **and** downgrade tested on every test run) |
 | Evidence storage | Private filesystem adapter (`STORAGE_DIR`), interface ready for an S3-compatible adapter |
 | Integrations | Adapter registry + canonical payloads, field mappings, reviewed identity maps, quarantine/replay, sync runs |
-| Background work | None in this release – imports and reports run synchronously (see limitations) |
+| Background work | Daily scheduled pulls (`python -m app.services.integration.scheduler`, run every 15 min by Windows Task Scheduler / cron, or `SCHEDULER_ENABLED=true` in a single-process server); imports and reports otherwise run synchronously |
 
 ## 2. Seven workstreams (V2 §3)
 
@@ -116,6 +116,8 @@ status columns (submission / validation / review / verification), append-only `a
 | Mock water meter (`mock_water_meter`) | **MOCK** – synthetic paginated payloads with retry, duplicate and bad record |
 | Mock IoT gateway (`mock_iot_gateway`) | **MOCK** – SoilSync/Moisture Probe/MicroClime/RainSync style readings |
 
+Every pull – manual or scheduled – leaves a sync run; a pull that fails before any record is processed (expired token, source unreachable, missing configuration) is recorded as *failed* with its reason. `GET /api/v1/integrations/health` reports each source's freshness (ok / manual / stale / failed / never run) and the FarmFuture token expiry, shown on the dashboard and the Integrations page.
+
 Inbound contract: `POST /api/v1/integrations/{source}/{measurements|observations|advisories}` with `X-Source-Key`.
 Field mappings (incl. nested `attributes.x` targets and `payload_defaults`), reviewed identity maps for
 farmer/plot/device IDs, exact-code matching configurable, quarantine with readable reasons, replay and discard.
@@ -160,11 +162,11 @@ independence). Exit code 1 when an error-level check fails; run it before genera
 
 ## 9. Known limitations (this release)
 
-* No live external integrations – API contracts, credentials and device protocols are not yet supplied.
+* FarmFuture connectors run on a 7-day test token (read-only GET); production credentials, IMD and other institutional data are not yet supplied.
 * Indicator definitions are seeded as *Pending programme-owner approval*; demo results are PROVISIONAL.
 * Official NABARD CCF-ID templates are not available; the CCF-ID report follows the platform structure.
 * Endline/impact assessment is disabled until a methodology is approved.
-* No offline field mode; no map/geospatial layer (needs licensed datasets).
+* No offline field mode; the farm map uses open layers only (licensed high-resolution layers not available).
 * Imports, calculations and reports run synchronously – add a job queue before very large imports.
 * No antivirus scanning of uploads; email/SMS delivery for password reset is not configured.
 * No sign-in lockout or throttling yet (failed sign-ins are audited) – policy decision `LOGIN_LOCKOUT` pending.

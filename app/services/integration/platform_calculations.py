@@ -30,7 +30,7 @@ class RainfallStatusAdapter(PlatformAdapter):
                        "missing rain and the status band (extra … very much less rain). Uses validated records already in the "
                        "platform (station rain and 30-year normals, e.g. from the FarmFuture weather source); nothing is "
                        "fetched from outside. Days without a station reading are missing, not dry.",
-        "config": {}}
+        "config": {"schedule_daily_at": "07:30"}}
 
     def __init__(self, db: Session, source: IntegrationSource) -> None:
         super().__init__(db, source)

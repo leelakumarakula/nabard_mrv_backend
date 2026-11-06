@@ -1,5 +1,6 @@
 import hmac
 import uuid
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, Header, Request
 from sqlalchemy import func, select
@@ -47,15 +48,14 @@ from app.schemas.integration import (
 from app.services import audit, crud
 from app.services.integration.adapters import (
     LIVE_KEYED_ADAPTERS,
-    TransientSourceError,
+    PLATFORM_CALCULATION_ADAPTERS,
     catalogue,
-    get_adapter,
     requires_mock_flag,
-    with_retry,
 )
 from app.services.integration.farmfuture import import_farms
 from app.services.integration.farmfuture_data import import_devices
 from app.services.integration.pipeline import process_batch
+from app.services.integration.sync import farmfuture_token, run_pull
 
 router = APIRouter(prefix="/integrations", tags=["integrations"])
 
@@ -72,6 +72,8 @@ def _source_out(db: Session, source: IntegrationSource) -> SourceOut:
                      .order_by(SyncRun.started_at.desc()).limit(1))
     open_q = db.scalar(select(func.count()).select_from(QuarantinedRecord).where(
         QuarantinedRecord.source_id == source.id, QuarantinedRecord.status == "open")) or 0
+    schedule = (source.config or {}).get("schedule_daily_at")
+    when = f"daily at {schedule} and on demand" if schedule else "on demand (Run pull)"
     if not source.enabled:
         status = "disabled"
     elif source.adapter_code == "unconfigured_rest":
@@ -79,10 +81,12 @@ def _source_out(db: Session, source: IntegrationSource) -> SourceOut:
     elif source.is_mock:
         status = "MOCK adapter – synthetic data, not a live integration"
     elif source.adapter_code in LIVE_KEYED_ADAPTERS:
-        status = ("LIVE FarmFuture API (read-only) – runs when you pull" if get_settings().farmfuture_api_token
+        status = (f"LIVE FarmFuture API – {when}" if get_settings().farmfuture_api_token
                   else "not_configured – FARMFUTURE_API_TOKEN is not set on the server")
+    elif source.adapter_code in PLATFORM_CALCULATION_ADAPTERS:
+        status = f"Platform calculation – {when}"
     elif requires_mock_flag(source.adapter_code) is False:
-        status = "LIVE public data service (no key) – runs when you pull"
+        status = f"LIVE public data service – {when}"
     elif source.source_type == "rest_push":
         status = "awaiting inbound data" if last is None else "receiving"
     else:
@@ -304,29 +308,52 @@ def import_source_devices(source_code: str, current: CurrentUser = Depends(requi
 
 @router.post("/{source_code}/pull", response_model=BatchResultOut)
 def pull(source_code: str, current: CurrentUser = Depends(require("integration.manage")), db: Session = Depends(get_db)):
-    """Run a pull synchronisation through the source's adapter (pagination, retry with backoff)."""
-    source = _source(db, source_code)
-    if not source.enabled:
-        raise AppError(403, "source_disabled", f"Source '{source_code}' is disabled")
-    adapter = get_adapter(db, source)
-    cursor = (source.config or {}).get("cursor")
-    records: list[dict] = []
-    pages = 0
-    try:
-        while True:
-            page = with_retry(lambda c=cursor: adapter.fetch_page(c), attempts=int((source.config or {}).get("retries", 3)),
-                              base_delay=0.05)
-            records.extend(page.records)
-            pages += 1
-            if page.next_cursor is None or pages >= int((source.config or {}).get("max_pages", 50)):
-                break
-            cursor = page.next_cursor
-    except TransientSourceError as exc:
-        raise AppError(502, "source_unavailable", f"Source unavailable after retries: {exc}") from exc
-    run, outcomes = process_batch(db, source, adapter.payload_kind, records, "pull", current)
-    run.cursor = f"pages={pages}"
-    db.commit()
+    """Run a pull synchronisation through the source's adapter (pagination, retry with backoff). A pull that fails is
+    recorded as a failed sync run with its reason."""
+    run, outcomes = run_pull(db, _source(db, source_code), current)
     return BatchResultOut(sync_run=SyncRunOut.model_validate(run), outcomes=outcomes)
+
+
+@router.get("/health")
+def sources_health(current: CurrentUser = Depends(require("integration.read")), db: Session = Depends(get_db)) -> dict:
+    """Freshness of every pull source (last run, last success, schedule, stale flag) and the FarmFuture token expiry –
+    for the dashboard's data-sources panel. A scheduled source is stale when it has not succeeded for over 26 hours."""
+    kinds = {c["adapter_code"]: c.get("kind") for c in catalogue()}
+    now = datetime.now(UTC)
+    sources = []
+    for source in db.scalars(select(IntegrationSource).where(IntegrationSource.source_type == "rest_pull")
+                             .order_by(IntegrationSource.module_code, IntegrationSource.source_code)):
+        last = db.scalars(select(SyncRun).where(SyncRun.source_id == source.id, SyncRun.trigger.in_(("pull", "schedule")))
+                          .order_by(SyncRun.started_at.desc())).first()
+        ok = db.scalars(select(SyncRun).where(SyncRun.source_id == source.id, SyncRun.trigger.in_(("pull", "schedule")),
+                                              SyncRun.status.in_(("succeeded", "partial")))
+                        .order_by(SyncRun.started_at.desc())).first()
+        schedule = (source.config or {}).get("schedule_daily_at")
+        age = (now - _aware(ok.started_at)).total_seconds() / 3600 if ok else None
+        if not source.enabled:
+            state = "disabled"
+        elif last is not None and last.status == "failed":
+            state = "failed"
+        elif ok is None:
+            state = "never_run"
+        elif schedule and age is not None and age > 26:
+            state = "stale"
+        else:
+            state = "ok" if schedule else "manual"
+        sources.append({"source_code": source.source_code, "name": source.name, "module_code": source.module_code,
+                        "adapter_code": source.adapter_code, "kind": "sample" if source.is_mock else kinds.get(source.adapter_code),
+                        "is_mock": source.is_mock, "enabled": source.enabled, "schedule_daily_at": schedule,
+                        "last_run_at": last.started_at if last else None, "last_status": last.status if last else None,
+                        "last_error": (last.error_summary or "")[:300] if last and last.status == "failed" else None,
+                        "last_success_at": ok.started_at if ok else None,
+                        "hours_since_success": round(age, 1) if age is not None else None, "state": state})
+    return {"sources": sources, "farmfuture_token": farmfuture_token(),
+            "summary": {s: sum(1 for x in sources if x["state"] == s)
+                        for s in ("ok", "manual", "stale", "failed", "never_run", "disabled")}}
+
+
+def _aware(value: datetime) -> datetime:
+    return value if value.tzinfo else value.replace(tzinfo=UTC)
 
 
 @router.post("/{source_code}/test-payload", response_model=BatchResultOut)

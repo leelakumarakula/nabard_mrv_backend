@@ -1,4 +1,6 @@
 import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -11,7 +13,23 @@ from app.core.middleware import RequestContextMiddleware
 settings = get_settings()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    runner = None
+    if settings.scheduler_enabled:
+        from app.services.integration.scheduler import start_background
+
+        runner = start_background(settings.scheduler_interval_seconds)
+        logging.getLogger("mrv.scheduler").info("in-process scheduler started (every %ss)", settings.scheduler_interval_seconds)
+    yield
+    if runner is not None:
+        runner.stop.set()
+
+
 app = FastAPI(
+    lifespan=lifespan,
     title=settings.app_name,
     version="1.0.0",
     description=(

@@ -101,7 +101,22 @@ Platform calculation (reads the platform's own records, calls no external servic
 |---|---|---|
 | `platform_rainfall_status` | Station rain since 1 January vs the plot's 30-year normal, per month (run after the FarmFuture weather source, which supplies the station rain and the normals) | `rainfall_status` |
 
-Nothing is fetched until someone clicks **Run pull** on the source. Located plot = a plot with latitude/longitude whose
+Nothing is fetched until someone clicks **Run pull** on the source or the source's daily time comes round (setting `schedule_daily_at`, India time – the FarmFuture sources default to 06:00–07:00 and the rainfall status to 07:30).
+
+### Automatic daily pulls
+
+```powershell
+.\.venv\Scripts\python -m app.services.integration.scheduler --dry-run   # what is due now
+.\.venv\Scripts\python -m app.services.integration.scheduler             # run what is due
+```
+
+Run the command every 15 minutes from the backend folder (it reads `.env`), e.g. with Windows Task Scheduler:
+
+```powershell
+schtasks /Create /SC MINUTE /MO 15 /TN "MRV scheduled pulls" /TR "cmd /c cd /d D:\dev\mrv_nabard\mrv-backend && .venv\Scripts\python -m app.services.integration.scheduler >> storage\scheduler.log 2>&1"
+```
+
+or set `SCHEDULER_ENABLED=true` when the API runs as a single process. Runs are recorded as trigger *schedule* by the account in `MRV_SCHEDULER_EMAIL` (default: the first active super administrator). A failed run is retried at the next check; the dashboard's *Data sources* card lists failed and stale sources and the token expiry. Located plot = a plot with latitude/longitude whose
 farmer is enrolled in the programme. These are not IMD data; IMD and the FarmFuture APIs need agreements and API
 documentation first. The **Farm map** (`/map`, API `GET /api/v1/map/plots`) shows located plots with the latest values;
 without `farmer.read_pii` points are rounded to about 1 km. Outbound HTTPS to `api.open-meteo.com`,

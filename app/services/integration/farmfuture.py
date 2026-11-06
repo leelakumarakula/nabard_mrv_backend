@@ -126,7 +126,7 @@ class FarmFutureWaterEngineAdapter(FarmFutureApi, PlatformAdapter):
                        "rain and irrigation, water left, days of reserve, irrigation status and amount, sensor check and "
                        "confidence. Read-only GET calls with the token in FARMFUTURE_API_TOKEN. Map each FarmFuture "
                        "farm to a platform plot first (Identity maps).",
-        "config": {"past_days": 3, "horizon_days": 7}}
+        "config": {"schedule_daily_at": "06:20", "past_days": 3, "horizon_days": 7}}
 
     def __init__(self, db, source: IntegrationSource) -> None:
         super().__init__(db, source)

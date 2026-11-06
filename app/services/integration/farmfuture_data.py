@@ -200,7 +200,7 @@ class FarmFutureSoilMicroclimateAdapter(FarmFutureFarmAdapter):
                        "FarmFuture' first. N/P/K are in kg/ha and EC in µS/cm (as labelled in the FarmFuture app); the "
                        "leaf-wetness unit is not stated. 'series' chooses which processing of pH, EC and N/P/K is "
                        "imported: app (default – the values the FarmFuture app shows), raw, calibrated or lab_anchored.",
-        "config": {"past_days": 3, "sensor_history_days": 30, "series": "app", "units": DEFAULT_UNITS,
+        "config": {"schedule_daily_at": "06:10", "past_days": 3, "sensor_history_days": 30, "series": "app", "units": DEFAULT_UNITS,
                    "device_types": DEFAULT_DEVICE_TYPES,
                    "include_lab_reports": True, "include_reports_without_lab_name": False, "device_health": True,
                    "analogue_readings": True}}
@@ -533,7 +533,7 @@ class FarmFutureWeatherAdapter(FarmFutureFarmAdapter):
                        "(days without data stay missing, never zero), and 'climate_normals' imports each farm's 30-year "
                        "climate normals (CHIRPS rain, ERA5 temperature) used for the rainfall status. FarmFuture "
                        "publishes no climate-risk API.",
-        "config": {"past_days": 3, "rain_history_days": 365, "station_observations": True, "forecast": True,
+        "config": {"schedule_daily_at": "06:00", "past_days": 3, "rain_history_days": 365, "station_observations": True, "forecast": True,
                    "climate_normals": True}}
 
     def __init__(self, db: Session, source: IntegrationSource) -> None:
@@ -681,7 +681,7 @@ class FarmFuturePestScoutingAdapter(FarmFutureFarmAdapter):
         "description": "Field scouting recorded in the FarmFuture app on the linked farms – pest or disease, plants "
                        "inspected and plants with signs – as scouting / inspection records (incidence is calculated). "
                        "Phone numbers, notes, photos and GPS points of the scouting are not imported.",
-        "config": {"past_days": 365}}
+        "config": {"schedule_daily_at": "06:50", "past_days": 365}}
 
     def farm_records(self, client: httpx.Client, link: FarmLink) -> list[dict[str, Any]]:
         body = self.get_data(client, "/api/wsb/records", {"farm": link.farm_id}) or {}
@@ -740,7 +740,7 @@ class FarmFutureSatelliteAdapter(FarmFutureFarmAdapter):
                        "the linked FarmFuture farms, from FarmFuture's latest cloud-free Sentinel-2 pass; with "
                        "'site_profile', each farm's terrain, soil and erosion (RUSLE) profile as site characteristics; "
                        "with 'deforestation_screening', FarmFuture's no-deforestation (EUDR) screenings.",
-        "config": {"site_profile": True, "deforestation_screening": True}}
+        "config": {"schedule_daily_at": "06:30", "site_profile": True, "deforestation_screening": True}}
 
     def farm_records(self, client: httpx.Client, link: FarmLink) -> list[dict[str, Any]]:
         records = self._site_profile(client, link) if self.config.get("site_profile", True) else []
@@ -809,7 +809,7 @@ class FarmFutureHarvestAdapter(FarmFutureFarmAdapter):
         "description": "Harvests the growers record in FarmFuture's traceability module (date, quantity and unit, coffee "
                        "form, season, crop, grade) as harvest records – production data for yield and livelihood "
                        "outcomes. Cancelled harvests are skipped; notes and evidence files are not imported.",
-        "config": {"include_cancelled": False}}
+        "config": {"schedule_daily_at": "07:00", "include_cancelled": False}}
 
     def farm_records(self, client: httpx.Client, link: FarmLink) -> list[dict[str, Any]]:
         harvests = self.get_data(client, f"/api/plots/{link.farm_id}/harvests") or []
@@ -931,7 +931,7 @@ class FarmFutureAdvisoryAdapter(FarmFutureFarmAdapter):
                        "(e.g. leaf rust, stalk rot), the monthly pests-and-diseases outlook and irrigation timing. Each "
                        "becomes an advisory for the farmer's area; an app delivery is recorded as sent only – it is not "
                        "counted as delivered or read.",
-        "config": {"history_days": 0, "skip_kinds": ["data_request", "stage"], "record_app_delivery": True}}
+        "config": {"schedule_daily_at": "06:40", "history_days": 0, "skip_kinds": ["data_request", "stage"], "record_app_delivery": True}}
 
     def farm_records(self, client: httpx.Client, link: FarmLink) -> list[dict[str, Any]]:
         latest = self.get_data(client, f"/api/Advisory/{link.farm_id}/latest")

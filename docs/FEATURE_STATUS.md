@@ -40,11 +40,25 @@ Legend: **Implemented** – working and tested · **Configurable** – working; 
 | Integrations | FarmFuture harvest records (Workstream 6) | Implemented – test access, no data yet | `farmfuture_harvests`: harvests from FarmFuture's traceability module (date, quantity and unit, coffee form, season, crop) – production data for yield and livelihood outcomes. Field names follow FarmFuture's documented harvest schema; unknown units are quarantined; cancelled harvests, notes and evidence files are not imported |
 | Field | Coffee calendar on the practice screen | Implemented | The month's recommended Arabica / Robusta tasks from FarmFuture's coffee calendar (Coffee Board guidance), read live (`GET /api/v1/coffee-calendar`), each with a suggested practice; staff record one as a *recommended* practice for a specific farmer – never counted for anyone automatically (MASTER_LISTS) |
 | Integrations | FarmFuture farm advisories (pest, disease, irrigation) | Implemented – test access | Live read-only pull (`farmfuture_advisories`): advisory-engine items (e.g. leaf rust, stalk rot, pests-and-diseases outlook, irrigate-by) → advisories for the farmer's area; app delivery recorded as *sent* only (FARMFUTURE_ADVISORY_DELIVERY). No risk level is given by FarmFuture, so none is stored |
+| Integrations | Automatic daily pulls, source freshness, failed-pull record, token expiry | Implemented | Per-source daily time (`schedule_daily_at`); scheduler command or in-process runner; every failed pull recorded with its reason; dashboard *Data sources* card (up to date / stale / failed / never run) and FarmFuture token expiry warning (Integrations page, under 7 days) |
 | Integrations | Other live IMD / IoT gateway feeds; FarmFuture yield prediction, EUDR readiness, finances | Awaiting approval / not in scope | No live data until contracts and access are confirmed; FarmFuture write endpoints are never called |
 | Platform | Data-consistency checker (`python -m app.services.integrity`) | Implemented | 12 read-only checks; run before reporting |
 | Platform | Sign-in lockout, upload virus scanning, outbound SMS/email | Not started | Lockout awaits a policy decision |
 | Platform | Farm map (MapLibre): located plots coloured by practice progress, risk, NDVI or forecast rain; 2D / 3D terrain, rotation, streets / satellite / relief, 3D columns; real farm outline for FarmFuture plots | Implemented | Points rounded to ~1 km without farmer.read_pii; outlines need farmer.read_pii and are read live from FarmFuture, never stored. Open layers only (OSM, AWS Terrain Tiles, Sentinel-2 cloudless 2016 by EOX, CC BY 4.0) – no licensed high-resolution imagery |
 | Platform | Offline field mode, plot boundaries / licensed geospatial layers | Not started | Needs confirmed requirements and licensed datasets |
+
+## Candidate indicators from the new data (not created – pending INDICATOR_DEFINITIONS)
+
+The data now collected could support these indicators once the programme owner approves definitions, denominators and methods; none is calculated or reported until then:
+
+| Workstream | Candidate | Data |
+|---|---|---|
+| 1 Climate | Plots / households with a rainfall-shortfall status (much less or very much less rain, year to date) | `rainfall_status` |
+| 1 Climate | Households reached by an early-warning advisory (needs FARMFUTURE_ADVISORY_DELIVERY) | advisories, deliveries |
+| 2 Soil & water | Plots in severe erosion classes with an observed conservation practice | `site_characteristics`, practices |
+| 4 Soil & microclimate | Share of active devices reporting on ≥ 80 % of days (data completeness) | sensor readings, `device_health` |
+| 5 Suitability | Farms screened with no deforestation since 2020 | `deforestation_check` |
+| 6 / 7 Livelihoods | Coffee production per hectare (when growers record harvests) | `harvest_record` |
 
 ## Pending programme-owner decisions
 
