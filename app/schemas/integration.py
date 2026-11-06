@@ -11,7 +11,8 @@ AdapterCode = Literal["push_only", "unconfigured_rest", "mock_water_meter", "moc
                       "nasa_power_weather", "sentinel2_ndvi", "sample_climate_engine", "sample_pest_engine",
                       "sample_water_engine", "sample_iot_gateway", "farmfuture_water_engine",
                       "farmfuture_soil_microclimate", "farmfuture_pest_scouting", "farmfuture_satellite",
-                      "farmfuture_advisories", "farmfuture_weather", "platform_rainfall_status"]
+                      "farmfuture_advisories", "farmfuture_weather", "farmfuture_harvests",
+                      "platform_rainfall_status"]
 
 
 class SourceIn(BaseModel):

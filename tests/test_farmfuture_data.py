@@ -181,6 +181,34 @@ def farmfuture(monkeypatch):
             return httpx.Response(200, json={"farmId": FARM_A, "days": [{"runDate": yesterday}, {"runDate": older}]})
         if path == "/WeatherForecast/forecast":
             return httpx.Response(200, json=_forecast())
+        if path == f"/api/EudrReadiness/{FARM_A}":
+            return ok({"farmId": FARM_A, "farmName": "Upper", "hasBoundary": False, "hasReport": False, "missing": ["BOUNDARY", "REPORT"],
+                       "screening": {"id": "abababab-0000-4000-8000-000000000001", "complianceFlag": "Compliant (risk-based)",
+                                     "complianceReason": "No deforestation detected; compliant.", "riskScore": 0,
+                                     "deforestedSince2020Ha": 0, "screenedAt": "2026-03-03T07:05:41Z"}})
+        if path.startswith("/api/EudrReadiness/"):
+            return ok({"hasBoundary": False, "screening": None, "missing": ["BOUNDARY", "SCREENING", "REPORT"]})
+        if path == f"/api/plots/{FARM_A}/harvests":
+            return ok([{"id": "cdcdcdcd-0000-4000-8000-000000000001", "farmId": FARM_A, "cropId": "c-robusta",
+                        "harvestDate": "2026-01-15T00:00:00Z", "grossQuantity": 1250.5, "quantityUnit": "KG",
+                        "coffeeForm": "CHERRY", "season": "2025/26", "status": "AVAILABLE_FOR_BATCHING",
+                        "notes": "Picked by Ramesh, phone +919800000000", "evidenceRef": "photo.jpg"},
+                       {"id": "cdcdcdcd-0000-4000-8000-000000000002", "harvestDate": "2026-01-20T00:00:00Z",
+                        "grossQuantity": 10, "quantityUnit": "BAG", "status": "CANCELLED"},
+                       {"id": "cdcdcdcd-0000-4000-8000-000000000003", "harvestDate": "2026-01-22T00:00:00Z",
+                        "grossQuantity": 3, "quantityUnit": "BASKET", "status": "CLOSED"}])
+        if path == f"/api/plots/{FARM_A}/harvest-context":
+            return ok({"crops": [{"cropId": "c-robusta", "cropType": "Coffee-Robusta"}]})
+        if path.endswith("/harvests"):
+            return ok([])
+        if path == "/api/StaticData/GetCropsData":
+            return ok([{"cropId": "c-arabica", "cropType": "Coffee-Arabica"}, {"cropId": "c-robusta", "cropType": "Coffee-Robusta"}])
+        if path == "/api/CalendarV2/GetDefaultCalendarEventsByMonth":
+            assert params["cropid"] == "c-robusta"
+            return ok([{"id": "t1", "description": "Install broca traps in field and drying yards if not done.",
+                        "category": "Established blocks", "startDate": "2025-11-01T00:00:00Z", "endDate": "2025-11-30T00:00:00Z"},
+                       {"id": "t2", "description": "Take up lime washing on young dadap stems.", "category": "Established blocks"},
+                       {"id": "t3", "description": "Take up clean weeding in Robusta blocks.", "category": "Established blocks"}])
         if path == "/api/Data/GetWeatherStats" and params["parameter"] == "rainfall_mm":
             state["weather_stats_params"] = dict(params)
             ten, nine = (today_ist() - timedelta(days=10)).isoformat(), (today_ist() - timedelta(days=9)).isoformat()
@@ -360,6 +388,35 @@ def test_sensor_history_is_filled_in_once(api, db, farmfuture) -> None:
     assert (run["records_accepted"], run["records_duplicate"]) == (0, 14)  # the earlier day is not sent again
 
 
+def test_harvest_records(api, db, farmfuture) -> None:
+    plot = _link_farms(api, db)
+    code = _register(api, "farmfuture_harvests")
+    run = api.as_("admin").post(f"/integrations/{code}/pull").json()["sync_run"]
+    # one harvest imported, the cancelled one skipped, the one in an unknown unit (basket) quarantined – never guessed
+    assert (run["records_accepted"], run["records_rejected"]) == (1, 1), run
+    assert {r.method for r in farmfuture["requests"]} == {"GET"}
+    (harvest,) = _records(db, code)
+    a = harvest.attributes
+    assert (harvest.record_type, harvest.data_nature, harvest.farm_plot_id) == ("harvest_record", "user_reported", plot.id)
+    assert (float(harvest.value), harvest.unit, a["coffee_form"], a["crop_type"], a["season"]) == (
+        1250.5, "kg", "cherry", "Coffee-Robusta", "2025/26")
+    assert "Ramesh" not in json.dumps(a) and "photo" not in json.dumps(a)  # notes and evidence files are not imported
+
+
+def test_coffee_calendar_is_read_live(api, farmfuture) -> None:
+    from app.services.integration import farmfuture_data
+    farmfuture_data._CALENDAR_CACHE.clear()
+    r = api.as_("field").get("/coffee-calendar", params={"month": 11, "crop": "robusta"})
+    assert r.status_code == 200, r.text
+    tasks = {t["id"]: t for t in r.json()["tasks"]}
+    assert tasks["t1"]["suggested_activity_code"] == "PEST_PREVENTION" and tasks["t1"]["window"] == "01 Nov – 30 Nov"
+    assert tasks["t2"]["suggested_activity_code"] == "SHADE_CANOPY"  # lime washing protects shade trees, not soil pH
+    assert tasks["t3"]["suggested_activity_code"] is None  # staff choose the practice
+    assert {q.method for q in farmfuture["requests"]} == {"GET"}
+    assert api.as_("field").get("/coffee-calendar", params={"month": 13}).status_code == 422
+    farmfuture_data._CALENDAR_CACHE.clear()
+
+
 def test_forecast_days_are_whole_ist_days_in_celsius() -> None:
     days = forecast_days(_forecast(), today_ist())
     assert [d["forecast_date"] for d in days] == [today_ist() + timedelta(days=1)]  # today and the part day dropped
@@ -452,7 +509,13 @@ def test_scouting_satellite_and_advisories(api, db, farmfuture) -> None:
 
     satellite = _register(api, "farmfuture_satellite")
     run = api.as_("admin").post(f"/integrations/{satellite}/pull").json()["sync_run"]
-    assert run["records_accepted"] == 3, run  # FARM_A: zone NDVI + site profile; FARM_B: site profile
+    assert run["records_accepted"] == 4, run  # FARM_A: zone NDVI + site profile + screening; FARM_B: site profile only
+    check = next(r for r in _records(db, satellite) if r.record_type == "deforestation_check")
+    c = check.attributes
+    assert (check.farm_plot_id, float(check.value), c["compliance_flag"], c["screened_on"]) == (
+        plot.id, 0.0, "Compliant (risk-based)", "2026-03-03")
+    assert (c["boundary_mapped"], c["report_available"], c["missing_items"]) == (False, False, "boundary, report")
+    assert check.validation_status == "valid" and check.data_nature == "calculated"
     site = next(r for r in _records(db, satellite) if r.record_type == "site_characteristics" and r.farm_plot_id == plot.id)
     s = site.attributes
     assert (site.data_nature, float(site.value), s["erosion_class"], s["erosion_severe_share_pct"]) == ("assessment", 65.3, "severe", 87.5)

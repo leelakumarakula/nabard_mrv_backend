@@ -23,6 +23,7 @@ from app.services.integration.base import PageResult, TransientSourceError, with
 from app.services.integration.farmfuture import FarmFutureWaterEngineAdapter
 from app.services.integration.farmfuture_data import (
     FarmFutureAdvisoryAdapter,
+    FarmFutureHarvestAdapter,
     FarmFuturePestScoutingAdapter,
     FarmFutureSatelliteAdapter,
     FarmFutureSoilMicroclimateAdapter,
@@ -157,13 +158,14 @@ ADAPTERS: dict[str, type | None] = {
     "farmfuture_satellite": FarmFutureSatelliteAdapter,
     "farmfuture_advisories": FarmFutureAdvisoryAdapter,
     "farmfuture_weather": FarmFutureWeatherAdapter,
+    "farmfuture_harvests": FarmFutureHarvestAdapter,
     "platform_rainfall_status": RainfallStatusAdapter,
 }
 SYNTHETIC_ADAPTERS = {"mock_water_meter", "mock_iot_gateway", "sample_climate_engine", "sample_pest_engine",
                       "sample_water_engine", "sample_iot_gateway"}
 PUBLIC_DATA_ADAPTERS = {"open_meteo_weather", "nasa_power_weather", "sentinel2_ndvi"}
 LIVE_KEYED_ADAPTERS = {"farmfuture_water_engine", "farmfuture_soil_microclimate", "farmfuture_pest_scouting",
-                       "farmfuture_satellite", "farmfuture_advisories", "farmfuture_weather"}
+                       "farmfuture_satellite", "farmfuture_advisories", "farmfuture_weather", "farmfuture_harvests"}
 PLATFORM_CALCULATION_ADAPTERS = {"platform_rainfall_status"}
 
 

@@ -1,6 +1,6 @@
 import uuid
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -25,8 +25,9 @@ from app.schemas.workstream import (
     PracticeUpdate,
 )
 from app.services import crud
+from app.services.integration import farmfuture_data
 from app.services.locate import can_edit_own, resolve
-from app.services.record_types import MODULES_BY_CODE
+from app.services.record_types import ACTIVITIES, MODULES_BY_CODE
 from app.services.scope import apply_scope
 
 router = APIRouter(tags=["advisories & practices"])
@@ -189,6 +190,17 @@ def _scoped_practice(db: Session, practice_id: uuid.UUID, current: CurrentUser) 
     rec = crud.get_or_404(db, PracticeRecord, practice_id, "Practice record")
     current.ensure_access(rec.geo_unit_id, rec.organisation_id)
     return rec
+
+
+@router.get("/coffee-calendar")
+def coffee_calendar_tasks(month: int = Query(..., ge=1, le=12), crop: str = Query("robusta", pattern="^(arabica|robusta)$"),
+                          current: CurrentUser = Depends(require("module.read"))) -> dict:
+    """The month's recommended coffee tasks from FarmFuture's coffee calendar (read live, not stored) – suggestions
+    staff may record as a 'recommended' practice for a farmer; they are never counted for anyone automatically."""
+    tasks = farmfuture_data.coffee_calendar(month, crop)
+    activities = {code: name for _, code, name in ACTIVITIES}
+    return {"month": month, "crop": crop, "source": "FarmFuture coffee calendar (Coffee Board guidance)",
+            "tasks": [{**t, "suggested_activity_name": activities.get(t["suggested_activity_code"])} for t in tasks]}
 
 
 @router.get("/practice-records", response_model=Page[PracticeOut])

@@ -10,6 +10,9 @@ Only HTTP GET is ever sent to the FarmFuture API (through ``FarmFutureApi._reque
   GET /api/Data/GetWeatherStats?macAddress=&parameter=    daily station rain history
   GET /api/FarmProfile/{farm_id}                          terrain, soil and erosion profile of the farm (site characteristics)
   GET /api/FarmProfile/{farm_id}/climate                  30-year climate normals of the farm location
+  GET /api/EudrReadiness/{farm_id}                        no-deforestation (EUDR) screening and what is still missing
+  GET /api/plots/{farm_id}/harvests                       harvests recorded in the FarmFuture traceability module
+  GET /api/CalendarV2/GetDefaultCalendarEventsByMonth     the month's recommended coffee tasks (coffee calendar)
   GET /api/SoilLabReport/GetByFarm/{farm_id}              soil lab reports
   GET /api/wsb/records?farm=                              field scouting records (plants inspected / with signs)
   GET /api/Satellite/ZoneSummary/{farm_id}                block (zone) NDVI / NDMI summary of the latest satellite pass
@@ -42,7 +45,7 @@ from app.services.integration.platform_adapters import IST, PlatformAdapter, _in
 from app.services.record_types import MONTHS, PESTS
 
 FARMFUTURE_ADAPTERS = {"farmfuture_water_engine", "farmfuture_soil_microclimate", "farmfuture_pest_scouting",
-                       "farmfuture_satellite", "farmfuture_advisories", "farmfuture_weather"}
+                       "farmfuture_satellite", "farmfuture_advisories", "farmfuture_weather", "farmfuture_harvests"}
 OWNER = "FarmFuture (Varsapradaya)"
 
 
@@ -735,12 +738,33 @@ class FarmFutureSatelliteAdapter(FarmFutureFarmAdapter):
         "kind": "live_api", "default_source_code": "farmfuture_satellite", "owner": OWNER,
         "description": "Mean, lowest and highest NDVI, mean moisture index (NDMI) and declining cells for every block of "
                        "the linked FarmFuture farms, from FarmFuture's latest cloud-free Sentinel-2 pass; with "
-                       "'site_profile', each farm's terrain, soil and erosion (RUSLE) profile as site characteristics.",
-        "config": {"site_profile": True}}
+                       "'site_profile', each farm's terrain, soil and erosion (RUSLE) profile as site characteristics; "
+                       "with 'deforestation_screening', FarmFuture's no-deforestation (EUDR) screenings.",
+        "config": {"site_profile": True, "deforestation_screening": True}}
 
     def farm_records(self, client: httpx.Client, link: FarmLink) -> list[dict[str, Any]]:
         records = self._site_profile(client, link) if self.config.get("site_profile", True) else []
+        if self.config.get("deforestation_screening", True):
+            records.extend(self._screening(client, link))
         return records + self._zones(client, link)
+
+    def _screening(self, client: httpx.Client, link: FarmLink) -> list[dict[str, Any]]:
+        """FarmFuture's latest no-deforestation screening of the farm (none → no record: the farm is not screened).
+        The screening PDF is never read – it carries the grower's name; only the screening figures are stored."""
+        status = self.get_data(client, f"/api/EudrReadiness/{link.farm_id}")
+        screening = (status or {}).get("screening") if isinstance(status, dict) else None
+        day = _day((screening or {}).get("screenedAt"))
+        if not isinstance(screening, dict) or not screening.get("id") or day is None:
+            return []
+        missing = [str(m).lower() for m in status.get("missing") or []]
+        return [self.observation(f"FF-EUDR-{link.farm_id}-{screening['id']}", "deforestation_check", link.plot, {
+            "source_name": "FarmFuture EUDR screening", "screened_on": day.isoformat(),
+            "compliance_flag": str(screening.get("complianceFlag") or "not stated")[:200],
+            "compliance_reason": screening.get("complianceReason"),
+            "deforested_since_2020_ha": _num(screening.get("deforestedSince2020Ha"), 3),
+            "risk_score": _num(screening.get("riskScore"), 3), "boundary_mapped": status.get("hasBoundary"),
+            "report_available": status.get("hasReport"), "missing_items": ", ".join(missing) or "nothing",
+            "screening_ref": str(screening["id"])}, _noon(day))]
 
     def _site_profile(self, client: httpx.Client, link: FarmLink) -> list[dict[str, Any]]:
         profile = self.get_data(client, f"/api/FarmProfile/{link.farm_id}")
@@ -772,6 +796,99 @@ class FarmFutureSatelliteAdapter(FarmFutureFarmAdapter):
                 "ndmi_mean": _num(zone.get("avgNdmi")), "cells_count": zone.get("cells"),
                 "declining_cells": zone.get("decliningCells")}, _noon(day)))
         return records
+
+
+# -- Workstream 6: harvests recorded in the FarmFuture traceability module -----------------------------------------
+class FarmFutureHarvestAdapter(FarmFutureFarmAdapter):
+    """Field names follow FarmFuture's documented harvest schema (CreateHarvestRequest); a harvest without a date,
+    quantity or known unit fails validation and is quarantined rather than guessed."""
+
+    catalogue: ClassVar[dict[str, Any]] = {
+        "name": "FarmFuture harvest records (live API, read-only)", "module_code": "farmer_fpo", "kind": "live_api",
+        "default_source_code": "farmfuture_harvests", "owner": OWNER,
+        "description": "Harvests the growers record in FarmFuture's traceability module (date, quantity and unit, coffee "
+                       "form, season, crop, grade) as harvest records – production data for yield and livelihood "
+                       "outcomes. Cancelled harvests are skipped; notes and evidence files are not imported.",
+        "config": {"include_cancelled": False}}
+
+    def farm_records(self, client: httpx.Client, link: FarmLink) -> list[dict[str, Any]]:
+        harvests = self.get_data(client, f"/api/plots/{link.farm_id}/harvests") or []
+        if not isinstance(harvests, list) or not harvests:
+            return []
+        context = self.get_data(client, f"/api/plots/{link.farm_id}/harvest-context") or {}
+        crops = {str(c.get("cropId")): c.get("cropType") for c in (context.get("crops") or []) if isinstance(c, dict)}
+        records = []
+        for item in harvests:
+            if not isinstance(item, dict) or not item.get("id"):
+                continue
+            status = str(item.get("status") or "")
+            if status.upper() == "CANCELLED" and not self.config.get("include_cancelled"):
+                continue
+            day = _day(item.get("harvestDate"))
+            records.append(self.observation(f"FF-HARVEST-{item['id']}", "harvest_record", link.plot, {
+                "harvest_date": day.isoformat() if day else None,
+                "harvest_start_date": (_day(item.get("harvestStartDate")) or None) and str(_day(item.get("harvestStartDate"))),
+                "harvest_end_date": (_day(item.get("harvestEndDate")) or None) and str(_day(item.get("harvestEndDate"))),
+                "gross_quantity": _num(item.get("grossQuantity"), 3),
+                "quantity_unit": str(item.get("quantityUnit") or "").lower() or None,
+                "coffee_form": str(item.get("coffeeForm") or "").lower() or None,
+                "crop_type": item.get("cropType") or crops.get(str(item.get("cropId"))), "season": item.get("season"),
+                "variety": item.get("variety"), "processing_method": item.get("processingMethod"),
+                "moisture_pct": _num(item.get("moisturePercentage"), 1), "grade": item.get("grade"),
+                "record_status": status or None, "source_name": "FarmFuture traceability"}, _noon(day) if day else None))
+        return records
+
+
+# -- coffee calendar (recommended tasks of the month), read live for the practice screens --------------------------
+COFFEE_CROPS = {"arabica": "Coffee-Arabica", "robusta": "Coffee-Robusta"}
+# Keyword → suggested platform practice (activity) for a calendar task; staff confirm it before recording anything.
+TASK_ACTIVITIES = [(("borer", "broca", "caterpillar", "mealybug", "shb", "insect", "pest", "trap"), "PEST_PREVENTION"),
+                   (("rust", "disease", "fungicide", "bordeaux", "rot", "spray"), "PEST_PREVENTION"),
+                   (("mulch",), "MULCHING"), (("irrigat", "water"), "WATER_MANAGEMENT"),
+                   (("trench", "terrac", "bund", "contour", "erosion", "drain"), "SOIL_CONSERVATION"),
+                   (("shade", "dadap", "lopping", "pruning", "handling", "canopy"), "SHADE_CANOPY"),
+                   (("lime", "liming", "fertili", "manur", "nutrient", "soil test", "urea", "npk"), "SOIL_HEALTH")]
+_CALENDAR_CACHE: dict[tuple[int, str], tuple[datetime, list[dict[str, Any]]]] = {}
+
+
+def suggested_activity(text: str) -> str | None:
+    lowered = text.lower()
+    return next((code for words, code in TASK_ACTIVITIES if any(w in lowered for w in words)), None)
+
+
+def coffee_calendar(month: int, crop: str) -> list[dict[str, Any]]:
+    """The month's recommended tasks for Arabica or Robusta from FarmFuture's coffee calendar (read live, cached for six
+    hours; nothing is stored). Each task carries a suggested platform practice for staff to confirm."""
+    key = (month, crop)
+    cached = _CALENDAR_CACHE.get(key)
+    if cached and cached[0] > datetime.now(IST):
+        return cached[1]
+    api = FarmFutureApi()
+    api.config = {}
+    api._init_api()
+    with api.client() as client:
+        response = api._request(client, "/api/StaticData/GetCropsData")
+        crops = (response.json() or {}).get("data") if response.status_code == 200 else None
+        crop_id = next((c.get("cropId") for c in crops or [] if c.get("cropType") == COFFEE_CROPS[crop]), None)
+        if crop_id is None:
+            raise AppError(502, "source_error", f"FarmFuture has no crop '{COFFEE_CROPS[crop]}'")
+        response = api._request(client, "/api/CalendarV2/GetDefaultCalendarEventsByMonth",
+                                {"month": month, "cropid": crop_id})
+    if response.status_code >= 400:
+        raise AppError(502, "source_error", f"FarmFuture coffee calendar failed (HTTP {response.status_code})")
+    body = response.json() or {}
+    items = body.get("data") if isinstance(body, dict) else None
+    tasks = []
+    for item in items or []:
+        text = str(item.get("description") or "").strip()
+        if not text:
+            continue
+        start, end = _day(item.get("startDate")), _day(item.get("endDate"))
+        tasks.append({"id": item.get("id"), "task": text, "category": item.get("category"), "month": month,
+                      "crop": crop, "window": f"{start:%d %b} – {end:%d %b}" if start and end else None,
+                      "suggested_activity_code": suggested_activity(text)})
+    _CALENDAR_CACHE[key] = (datetime.now(IST) + timedelta(hours=6), tasks)
+    return tasks
 
 
 # -- farm advisories (pest & disease warnings, irrigation, seasonal outlook) ----------------------------------------

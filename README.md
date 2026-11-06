@@ -88,8 +88,9 @@ Live FarmFuture connectors (read-only GET calls with `FARMFUTURE_API_TOKEN`; Far
 | `farmfuture_water_engine` | Water Balance Engine irrigation plan; **Import farms** links FarmFuture farms to plots | `water_balance_output` |
 | `farmfuture_soil_microclimate` | **Import devices** (SoilSync, MicroClime, Analogue Weather), then daily statistics (setting `series`: app, raw, calibrated or lab-anchored; `sensor_history_days` fills earlier days once), soil lab reports and daily device health | `sensor_observation`, `soil_test`, `device_health` |
 | `farmfuture_pest_scouting` | App scouting (plants inspected / with signs) | `pest_inspection` |
-| `farmfuture_satellite` | Per-block NDVI / NDMI from FarmFuture's Sentinel-2 pass, and each farm's terrain / soil / erosion profile | `vegetation_index`, `site_characteristics` |
+| `farmfuture_satellite` | Per-block NDVI / NDMI from FarmFuture's Sentinel-2 pass, each farm's terrain / soil / erosion profile and its no-deforestation screening | `vegetation_index`, `site_characteristics`, `deforestation_check` |
 | `farmfuture_advisories` | Pest, disease and irrigation advisories (`history_days` for earlier runs) | advisories (app delivery = sent only) |
+| `farmfuture_harvests` | Harvests recorded in FarmFuture's traceability module | `harvest_record` |
 | `farmfuture_weather` | MicroClime station days (plus up to `rain_history_days` of earlier daily rain) and the 5-day FarmFuture forecast | `climate_observation`, `weather_forecast` |
 
 Order: import farms on the water-engine source first; the other FarmFuture connectors reuse those farm links.
