@@ -94,7 +94,11 @@ def farmfuture(monkeypatch):
                         "createdDate": "2025-06-16T18:13:18Z", "isCallibrated": True},
                        {"macAdress": HUB_MAC, "deviceTypeId": 1, "deviceName": "Hub"}])
         if path == "/api/Data/GetFarmStats":
-            return ok(_stats(yesterday, today) if params["farmId"] == FARM_A else {"sensorDevices": [], "weatherDevices": []})
+            if params["farmId"] == FARM_A:
+                return ok(_stats(yesterday, today))
+            # optionally FARM_B lists FARM_A's weather station too (seen live: one station on two FarmFuture farms)
+            shared = _stats(yesterday, today)["weatherDevices"] if state.get("share_station") else []
+            return ok({"sensorDevices": [], "weatherDevices": shared})
         if path == f"/api/SoilLabReport/GetByFarm/{FARM_A}":
             return ok([{"id": "55555555-5555-4555-8555-555555555555", "labName": "KVK Soil Lab", "labReportNo": "SL-7",
                         "sampledOn": "2026-06-19T00:00:00Z", "reportedOn": "2026-07-01T10:00:00Z", "unitBasis": "kg_ha_oxide",
@@ -126,6 +130,18 @@ def farmfuture(monkeypatch):
             return httpx.Response(200, json={"farmId": FARM_A, "days": [{"runDate": yesterday}, {"runDate": older}]})
         if path == "/WeatherForecast/forecast":
             return httpx.Response(200, json=_forecast())
+        if path == "/api/Data/GetWeatherStats" and params["parameter"] == "rainfall_mm":
+            state["weather_stats_params"] = dict(params)
+            ten, nine = (today_ist() - timedelta(days=10)).isoformat(), (today_ist() - timedelta(days=9)).isoformat()
+            # day -8 is missing (station did not report); yesterday lies inside the recent window and is ignored here
+            return ok({"macAddress": params["macAddress"], "stats": {
+                ten: {"rainfall_mm": {"last": 12.5}}, nine: {"rainfall_mm": {"last": 0}},
+                yesterday: {"rainfall_mm": {"last": 99.0}}}})
+        if path == "/api/Data/GetMinMaxMeanCalibrated":
+            series = {"nitrogen": {"min": 350, "max": 370, "mean": 360}, "pH": {"min": 3.2, "max": 3.5, "mean": 3.38}}
+            name = params["parameter"]
+            return ok({"macAddress": params["macAddress"], "stats": {yesterday: {name: series[name]}} if name in series
+                       else {}})
         if path == f"/api/Advisory/{FARM_A}" and params.get("date") == older:
             return httpx.Response(200, json=_advisory(older, f"{older}T08:00:00+05:30",
                                                       [_item(0, older, "stalk_rot.favourable_weather_watch")]))
@@ -174,7 +190,8 @@ def test_mapping_helpers() -> None:
 
 def test_device_import_and_daily_sensor_pull(api, db, farmfuture) -> None:
     plot = _link_farms(api, db)
-    code = _register(api, "farmfuture_soil_microclimate", past_days=1)
+    code = _register(api, "farmfuture_soil_microclimate", past_days=1,
+                     units={"nitrogen": "mg/kg", "phosphorus": "mg/kg", "potassium": "mg/kg", "leaf_wetness": "raw"})
     assert api.as_("admin").post(f"/integrations/{code}/pull").json()["error"]["code"] == "no_mapped_devices"
 
     out = api.as_("admin").post(f"/integrations/sources/{code}/import-devices").json()
@@ -199,8 +216,11 @@ def test_device_import_and_daily_sensor_pull(api, db, farmfuture) -> None:
     assert float(rain.value) == 4.2 and rain.attributes["aggregation"] == "daily_max" and rain.device_id is not None
     moisture = readings[("soil_moisture", "L2")]
     assert float(moisture.value) == 26.0 and moisture.attributes["value_min"] == 25.0 and moisture.farm_plot_id == plot.id
-    assert readings[("ec", None)].unit == "µS/cm" and readings[("nitrogen", None)].unit == "mg/kg"
+    # units as labelled in the FarmFuture app; an older source config ("mg/kg") cannot override them
+    assert readings[("ec", None)].unit == "µS/cm" and readings[("nitrogen", None)].unit == "kg/ha"
     assert readings[("leaf_wetness", None)].unit == "raw" and readings[("wind_speed", None)].unit == "m/s"
+    assert {r.attributes["series"] for r in readings.values()} == {"app"}
+    assert readings[("nitrogen", None)].attributes["source_dataset"].endswith("(as shown in the FarmFuture app)")
     assert all(r.validation_status == "valid" and r.is_demo is False for r in records), [r.validation_messages for r in records]
     lab = next(r for r in records if r.record_type == "soil_test")  # the report with no laboratory named is skipped
     assert lab.attributes["lab_name"] == "KVK Soil Lab" and lab.attributes["p2o5_kg_ha"] == 38.9
@@ -208,6 +228,47 @@ def test_device_import_and_daily_sensor_pull(api, db, farmfuture) -> None:
 
     run = api.as_("admin").post(f"/integrations/{code}/pull").json()["sync_run"]
     assert (run["records_accepted"], run["records_duplicate"]) == (0, 15)
+
+
+def test_sensor_series_choice_and_implausible_readings(api, db, farmfuture) -> None:
+    _link_farms(api, db)
+    code = _register(api, "farmfuture_soil_microclimate", past_days=1, series="calibrated", include_lab_reports=False)
+    api.as_("admin").post(f"/integrations/sources/{code}/import-devices")
+    run = api.as_("admin").post(f"/integrations/{code}/pull").json()["sync_run"]
+    # soil: L1, L2, soil temperature (app series) + N, pH (calibrated series; EC/P/K not supplied → left out); microclime: 7
+    assert (run["records_accepted"], run["records_rejected"]) == (12, 0), run
+    calls = [r for r in farmfuture["requests"] if r.url.path == "/api/Data/GetMinMaxMeanCalibrated"]
+    assert {r.url.params["parameter"] for r in calls} == {"pH", "ec", "nitrogen", "phosphorous", "potassium"}
+    assert {r.method for r in farmfuture["requests"]} == {"GET"}
+    readings = {(r.attributes["parameter"], r.attributes.get("layer")): r for r in _records(db, code)}
+    nitrogen = readings[("nitrogen", None)]
+    assert float(nitrogen.value) == 360 and nitrogen.attributes["series"] == "calibrated"
+    assert nitrogen.attributes["source_dataset"].endswith("calibrated series") and nitrogen.validation_status == "valid"
+    assert readings[("soil_moisture", "L1")].attributes["series"] == "app"
+    assert ("ec", None) not in readings and ("phosphorus", None) not in readings  # never mixed with app values
+    ph = readings[("ph", None)]  # pH 3.2–3.5 is physically implausible: kept, but held for an analyst
+    assert ph.validation_status == "exception" and "plausible range" in " ".join(ph.validation_messages)
+
+    r = api.as_("admin").patch(f"/integrations/sources/{code}", json={"config": {"programme_code": PROGRAMME,
+                                                                               "series": "smoothed"}})
+    assert r.status_code == 200
+    assert api.as_("admin").post(f"/integrations/{code}/pull").json()["error"]["code"] == "source_config"
+
+
+def test_water_plan_block_and_sensor_detail() -> None:
+    from app.services.integration.farmfuture import plan_attributes
+    plan = {"model_version": "1.3.0", "farm_id": FARM_A, "headline": {"status": "IRRIGATE_BY", "title": "Irrigate by Tue"},
+            "water_needed": {"depth_mm": 25.0, "total_m3": 433.7}, "season": {"label": "Early dry season"},
+            "plan_tier": {"tier": "FULL"}, "zone_totals": {"blocks": 2, "blocks_needing_water": 1},
+            "zones": [{"needs_by": "2026-11-12"}, {"needs_by": "2026-11-10"}, {"needs_by": None}],
+            "today": {"sensor": {"available": True, "reading_pct": 12.8, "model_pct": 33.9, "agrees": False,
+                                 "difference_pct": -21.1, "uncalibrated": False}}}
+    a = plan_attributes(plan)
+    assert (a["recommended_irrigation_mm"], a["needs_water_by"], a["blocks_total"], a["blocks_needing_water"]) == (
+        25.0, "2026-11-10", 2, 1)
+    assert (a["sensor_difference_pct"], a["sensor_calibrated"], a["plan_tier"]) == (-21.1, True, "FULL")
+    assert a["season_label"] == "Early dry season"
+    assert plan_attributes({"today": {"sensor": {"available": False, "difference_pct": 5}}})["sensor_difference_pct"] is None
 
 
 def test_forecast_days_are_whole_ist_days_in_celsius() -> None:
@@ -230,14 +291,24 @@ def test_weather_station_days_and_forecast(api, db, farmfuture) -> None:
     again = api.as_("admin").post("/integrations/sources/t_soil_two/import-devices").json()
     assert (again["devices_created"], again["already_imported"]) == (0, 2)
     farmfuture["requests"].clear()
+    farmfuture["share_station"] = True  # FARM_B also lists the station; it stays on the plot its device is registered on
 
     weather = _register(api, "farmfuture_weather")
     run = api.as_("admin").post(f"/integrations/{weather}/pull").json()["sync_run"]
-    # FARM_A: 1 station day; FARM_A and FARM_B (both located): 1 whole forecast day each
-    assert (run["records_accepted"], run["records_rejected"]) == (3, 0), run
+    # FARM_A: 1 station day + 2 earlier rain days; FARM_A and FARM_B (both located): 1 whole forecast day each
+    assert (run["records_accepted"], run["records_rejected"]) == (5, 0), run
     assert {r.method for r in farmfuture["requests"]} == {"GET"}
+    asked = farmfuture["weather_stats_params"]
+    assert asked["macAddress"] == CLIME_MAC and asked["endDate"].startswith((today_ist() - timedelta(days=4)).isoformat())
     records = _records(db, weather)
-    station = next(r for r in records if r.record_type == "climate_observation")
+    assert {r.farm_plot_id for r in records if r.record_type == "climate_observation"} == {plot.id}
+    history = sorted((r for r in records if r.record_type == "climate_observation" and "temp_max_c" not in r.attributes),
+                     key=lambda r: r.observed_at)
+    assert [r.attributes["rainfall_mm"] for r in history] == [12.5, 0.0]  # a missing day stays missing, never 0 mm
+    assert history[0].observed_at.date() == today_ist() - timedelta(days=10) and history[0].device_id is not None
+    run = api.as_("admin").post(f"/integrations/{weather}/pull").json()["sync_run"]
+    assert (run["records_accepted"], run["records_duplicate"]) == (0, 3)  # history days already imported are not re-sent
+    station = next(r for r in records if r.record_type == "climate_observation" and "temp_max_c" in r.attributes)
     assert station.module_code == "climate" and station.data_nature == "observed" and station.farm_plot_id == plot.id
     assert station.device_id == db.scalar(select(Device.id).where(Device.device_code == f"FF-{CLIME_MAC}"))
     a = station.attributes

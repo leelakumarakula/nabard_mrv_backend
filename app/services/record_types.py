@@ -26,6 +26,28 @@ PESTS = ["white_stem_borer", "coffee_berry_borer", "leaf_rust", "black_rot", "me
 SENSOR_PARAMETERS = ["soil_moisture", "soil_temperature", "air_temperature", "humidity", "rainfall", "ph", "ec",
                      "nitrogen", "phosphorus", "potassium", "air_pressure", "wind_speed", "leaf_wetness", "light_intensity"]
 SENSOR_UNITS = ["%", "°C", "mm", "pH", "dS/m", "µS/cm", "mg/kg", "kg/ha", "hPa", "m/s", "lux", "raw"]
+# Processing series of a device reading: "app" = the values the device platform shows its users (FarmFuture's daily
+# statistics), "raw" = uncorrected sensor output, "calibrated" = device calibration applied, "lab_anchored" = scaled to
+# a laboratory soil test. Which series counts for reporting is a pending programme decision (FARMFUTURE_SENSOR_UNITS).
+SENSOR_SERIES = ["app", "raw", "calibrated", "lab_anchored"]
+# Physically plausible range per (parameter, unit). A reading outside it is kept but marked as an exception for an
+# analyst to review (a sensor fault is more likely than a real value) – it is never silently accepted or dropped.
+SENSOR_PLAUSIBLE_RANGES: dict[tuple[str, str], tuple[float, float]] = {
+    ("ph", "pH"): (3.5, 9.5),
+    ("soil_temperature", "°C"): (0, 50),
+    ("air_temperature", "°C"): (-5, 48),
+    ("soil_moisture", "%"): (0, 100),
+    ("humidity", "%"): (0, 100),
+    ("rainfall", "mm"): (0, 500),
+    ("ec", "µS/cm"): (0, 20000),
+    ("ec", "dS/m"): (0, 20),
+    ("nitrogen", "kg/ha"): (0, 3000),
+    ("phosphorus", "kg/ha"): (0, 3000),
+    ("potassium", "kg/ha"): (0, 3000),
+    ("air_pressure", "hPa"): (600, 1100),
+    ("wind_speed", "m/s"): (0, 60),
+    ("light_intensity", "lux"): (0, 200000),
+}
 
 
 @dataclass(frozen=True)
@@ -237,6 +259,14 @@ RECORD_TYPES: list[RecordType] = [
          FieldSpec("sensor_agrees", "Sensor agrees with engine", "boolean"),
          FieldSpec("growth_stage", "Growth stage used", "text"),
          FieldSpec("growth_stage_estimated", "Growth stage estimated (not recorded)", "boolean"),
+         FieldSpec("sensor_difference_pct", "Sensor minus engine soil moisture", "number", unit="% points",
+                   min=-100, max=100),
+         FieldSpec("sensor_calibrated", "Soil sensor calibrated in the engine", "boolean"),
+         FieldSpec("blocks_total", "Blocks in the plan", "integer", min=0),
+         FieldSpec("blocks_needing_water", "Blocks needing water in the forecast window", "integer", min=0),
+         FieldSpec("needs_water_by", "Earliest block irrigation deadline", "date"),
+         FieldSpec("season_label", "Irrigation season used by the engine", "text"),
+         FieldSpec("plan_tier", "Engine input tier", "text", help="e.g. FULL = the farm's own weather and soil readings"),
          FieldSpec("data_mode", "Engine data mode", "text", help="e.g. MEASURED or ESTIMATED inputs"),
          FieldSpec("confidence", "Engine confidence", "text"),
          FieldSpec("confidence_score", "Engine confidence score", "integer", min=0, max=100)],
@@ -304,7 +334,10 @@ RECORD_TYPES: list[RecordType] = [
          FieldSpec("value_min", "Minimum in period", "number"),
          FieldSpec("value_max", "Maximum in period", "number"),
          FieldSpec("layer", "Sensor layer / depth", "text", help="e.g. L1 / L2 for two-depth soil-moisture probes"),
-         FieldSpec("source_dataset", "Source dataset", "text")],
+         FieldSpec("source_dataset", "Source dataset", "text"),
+         FieldSpec("series", "Sensor data series", "select", options=SENSOR_SERIES,
+                   help="Which processing of the device's readings this value comes from (the series used for "
+                        "reporting is a pending programme decision)")],
         requires_device=True, value_field="value", unit_field="unit",
     ),
     # 5. Suitability

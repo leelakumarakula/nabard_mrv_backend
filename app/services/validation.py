@@ -129,6 +129,22 @@ def validate_baseline(db: Session, rec: BaselineRecord) -> Outcome:
     return out
 
 
+def _check_sensor_plausibility(out: Outcome, attributes: dict) -> None:
+    """Readings outside the physically plausible range, or flagged by the device, need an analyst's decision."""
+    parameter, unit = attributes.get("parameter"), attributes.get("unit")
+    bounds = record_types.SENSOR_PLAUSIBLE_RANGES.get((parameter, unit))
+    if bounds is not None:
+        low, high = bounds
+        for key in ("value", "value_min", "value_max"):
+            value = attributes.get(key)
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and not low <= value <= high:
+                out.warnings.append(f"{parameter} {key.replace('_', ' ')} {value} {unit} is outside the plausible range "
+                                    f"{low}–{high} {unit} – possible sensor fault; review before use")
+                break
+    if attributes.get("quality_flag") in ("suspect", "out_of_range"):
+        out.warnings.append(f"The device marked this reading as {attributes['quality_flag'].replace('_', ' ')}")
+
+
 def validate_field_record(db: Session, rec: FieldRecord) -> Outcome:
     out = Outcome()
     rt = record_types.RECORD_TYPES_BY_CODE.get(rec.record_type)
@@ -155,6 +171,8 @@ def validate_field_record(db: Session, rec: FieldRecord) -> Outcome:
             out.errors.append(f"Device type '{device.device_type}' does not report '{parameter}'")
         if device is not None and device.status in ("faulty", "removed"):
             out.warnings.append(f"Device {device.device_code} is {device.status}; reading needs review")
+    if rt.code == "sensor_observation":
+        _check_sensor_plausibility(out, rec.attributes or {})
     if rt.data_nature != "model_prediction" and rec.observed_at is None:
         out.errors.append("Observation/activity date-time is required")
     _check_plot_farmer(db, out, rec.farmer_id, rec.farm_plot_id)

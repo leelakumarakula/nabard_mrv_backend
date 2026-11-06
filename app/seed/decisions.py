@@ -73,10 +73,12 @@ DECISIONS = [
      "Failed sign-ins are recorded in the audit log; no lockout or throttling is applied yet.",
      ["Sign-in", "Security"]),
     ("FARMFUTURE_SENSOR_UNITS", "integration", "Units and series of FarmFuture sensor data",
-     "FarmFuture does not state the units of soil EC, soil N/P/K and leaf wetness, nor which N/P/K series (raw, "
-     "calibrated or lab-anchored) and which daily rain figure are authoritative. Which apply?",
-     "Imported from FarmFuture's daily device statistics with EC in µS/cm, N/P/K in mg/kg, leaf wetness as a raw sensor "
-     "value and rain as the day's maximum (source config 'units'); all pending FarmFuture confirmation.",
+     "Which FarmFuture sensor series counts for reporting – the values the FarmFuture app shows, or the raw, calibrated "
+     "or lab-anchored series (they differ widely, e.g. N 185 / 331 / 360 / 331 kg/ha for one device and week)? What is "
+     "the unit of leaf wetness, and is MicroClime wind speed in m/s (API field name) or km/h (app label)?",
+     "N/P/K in kg/ha and EC in µS/cm as labelled in the FarmFuture app (reviewed 6 Nov 2026). The series shown in the "
+     "FarmFuture app is imported (source config 'series' = app) and every reading names its series; leaf wetness is a "
+     "raw value; wind is stored in m/s per the API field name; rain is the day's station total.",
      ["Soil & microclimate module", "IoT devices"]),
     ("FARMFUTURE_ADVISORY_DELIVERY", "integration", "Do FarmFuture app advisories count as delivered?",
      "When the FarmFuture app shows an advisory on a farmer's farm, does it count as delivered (or read) for the "
@@ -102,9 +104,15 @@ DECIDED = {
 
 
 def seed_programme_decisions(db: Session, programme_id: uuid.UUID | None) -> int:
+    """Add missing decisions; refresh the wording of decisions that are still pending (a decided entry is never
+    changed – it records what the programme owner decided)."""
     added = 0
     for code, category, title, question, provisional, affects in DECISIONS:
-        if db.scalar(select(ProgrammeDecision.id).where(ProgrammeDecision.code == code)) is None:
+        existing = db.scalar(select(ProgrammeDecision).where(ProgrammeDecision.code == code))
+        if existing is not None and existing.status == "pending" and code not in DECIDED:
+            existing.title, existing.question, existing.provisional_treatment = title, question, provisional
+            existing.affects = affects
+        if existing is None:
             decided = DECIDED.get(code)
             db.add(ProgrammeDecision(programme_id=programme_id, code=code, category=category, title=title, question=question,
                                      provisional_treatment=provisional, affects=affects, owner="Programme owner (NABARD / Varsapradaya)",

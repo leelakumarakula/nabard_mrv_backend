@@ -51,6 +51,10 @@ def plan_attributes(plan: dict[str, Any]) -> dict[str, Any]:
     recommended = water_needed.get("depth_mm") if water_needed else (0.0 if status == "NO_IRRIGATION" else None)
     first_dry = next((d.get("date") for d in plan.get("days") or [] if d.get("needs_water")), None)
     sensor = _get(plan, "today", "sensor") or {}
+    zones = [z for z in plan.get("zones") or [] if isinstance(z, dict)]
+    deadlines = sorted(str(z["needs_by"])[:10] for z in zones if z.get("needs_by"))
+    totals = plan.get("zone_totals") or {}
+    available = bool(sensor.get("available"))
     return {
         "engine_name": ENGINE_NAME, "engine_version": plan.get("model_version"),
         "source_farm_ref": plan.get("farm_id"), "irrigation_status": status, "advice": _get(plan, "headline", "title"),
@@ -69,6 +73,13 @@ def plan_attributes(plan: dict[str, Any]) -> dict[str, Any]:
         "sensor_reading_pct": sensor.get("reading_pct") if sensor.get("available") else None,
         "model_soil_water_pct": sensor.get("model_pct") if sensor.get("available") else None,
         "sensor_agrees": sensor.get("agrees") if sensor.get("available") else None,
+        "sensor_difference_pct": sensor.get("difference_pct") if available else None,
+        "sensor_calibrated": (not sensor["uncalibrated"]) if available and isinstance(sensor.get("uncalibrated"), bool)
+        else None,
+        "blocks_total": totals.get("blocks") if isinstance(totals.get("blocks"), int) else (len(zones) or None),
+        "blocks_needing_water": totals.get("blocks_needing_water"),
+        "needs_water_by": deadlines[0] if deadlines else None,
+        "season_label": _get(plan, "season", "label"), "plan_tier": _get(plan, "plan_tier", "tier"),
         "growth_stage": _get(plan, "stage", "label"), "growth_stage_estimated": _get(plan, "stage", "source", "estimated"),
         "data_mode": _get(plan, "data_quality", "mode"), "confidence": _get(plan, "confidence", "level"),
         "confidence_score": _get(plan, "confidence", "score"),
