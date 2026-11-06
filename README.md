@@ -81,6 +81,19 @@ Integrations → *Ready-made connectors* registers a pull source in one step (pi
 | `sample_climate_engine`, `sample_pest_engine`, `sample_water_engine` | SAMPLE – synthetic stand-ins for the FarmFuture engines | risk estimates / water-balance outputs, flagged DEMO |
 | `sample_iot_gateway` | SAMPLE – synthetic readings for every active registered device | `sensor_observation`, flagged DEMO |
 
+Live FarmFuture connectors (read-only GET calls with `FARMFUTURE_API_TOKEN`; FarmFuture is never written to):
+
+| Connector | Data | Creates |
+|---|---|---|
+| `farmfuture_water_engine` | Water Balance Engine irrigation plan; **Import farms** links FarmFuture farms to plots | `water_balance_output` |
+| `farmfuture_soil_microclimate` | **Import devices**, then daily SoilSync / MicroClime statistics and soil lab reports | `sensor_observation`, `soil_test` |
+| `farmfuture_pest_scouting` | App scouting (plants inspected / with signs) | `pest_inspection` |
+| `farmfuture_satellite` | Per-block NDVI / NDMI from FarmFuture's Sentinel-2 pass | `vegetation_index` |
+| `farmfuture_advisories` | Pest, disease and irrigation advisories (`history_days` for earlier runs) | advisories (app delivery = sent only) |
+| `farmfuture_weather` | MicroClime station days and the 5-day FarmFuture forecast | `climate_observation`, `weather_forecast` |
+
+Order: import farms on the water-engine source first; the other FarmFuture connectors reuse those farm links.
+
 Nothing is fetched until someone clicks **Run pull** on the source. Located plot = a plot with latitude/longitude whose
 farmer is enrolled in the programme. These are not IMD data; IMD and the FarmFuture APIs need agreements and API
 documentation first. The **Farm map** (`/map`, API `GET /api/v1/map/plots`) shows located plots with the latest values;

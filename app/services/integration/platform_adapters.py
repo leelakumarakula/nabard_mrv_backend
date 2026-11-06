@@ -362,7 +362,7 @@ class SampleIotGatewayAdapter(PlatformAdapter):
         slots = [last - timedelta(hours=interval * k) for k in range(max(1, _int(self.config, "hours", 24, 1, 168) // interval))]
         records = []
         for device in devices:
-            for parameter in sorted(DEVICE_PARAMETERS.get(device.device_type, ())):
+            for parameter in sorted(DEVICE_PARAMETERS.get(device.device_type, set()) & self.RANGES.keys()):
                 low, high, unit = self.RANGES[parameter]
                 for slot in slots:
                     records.append({

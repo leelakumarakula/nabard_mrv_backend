@@ -2,8 +2,10 @@
 
 * Mock adapters (mock_*) and sample adapters (sample_*) generate synthetic data and must be flagged is_mock.
 * Public-data adapters (Open-Meteo, NASA POWER, Sentinel-2) fetch real data from free services that need no key.
-* Live keyed adapters call a real authenticated API read-only (FarmFuture Water Balance Engine, token from settings).
-* Other FarmFuture engines stay ``unconfigured_rest`` until their API documentation is supplied.
+* Live keyed adapters call a real authenticated API read-only with the token from settings: FarmFuture Water Balance
+  Engine, soil & microclimate sensors, pest & disease scouting, satellite block greenness, farm advisories and on-farm
+  weather & forecast.
+* Any other source stays ``unconfigured_rest`` until its API documentation is supplied.
 """
 
 import os
@@ -17,6 +19,13 @@ from app.core.errors import AppError
 from app.models import Device, FarmPlot, IntegrationSource, Programme
 from app.services.integration.base import PageResult, TransientSourceError, with_retry
 from app.services.integration.farmfuture import FarmFutureWaterEngineAdapter
+from app.services.integration.farmfuture_data import (
+    FarmFutureAdvisoryAdapter,
+    FarmFuturePestScoutingAdapter,
+    FarmFutureSatelliteAdapter,
+    FarmFutureSoilMicroclimateAdapter,
+    FarmFutureWeatherAdapter,
+)
 from app.services.integration.platform_adapters import (
     NasaPowerAdapter,
     OpenMeteoAdapter,
@@ -140,11 +149,17 @@ ADAPTERS: dict[str, type | None] = {
     "sample_water_engine": SampleWaterEngineAdapter,
     "sample_iot_gateway": SampleIotGatewayAdapter,
     "farmfuture_water_engine": FarmFutureWaterEngineAdapter,
+    "farmfuture_soil_microclimate": FarmFutureSoilMicroclimateAdapter,
+    "farmfuture_pest_scouting": FarmFuturePestScoutingAdapter,
+    "farmfuture_satellite": FarmFutureSatelliteAdapter,
+    "farmfuture_advisories": FarmFutureAdvisoryAdapter,
+    "farmfuture_weather": FarmFutureWeatherAdapter,
 }
 SYNTHETIC_ADAPTERS = {"mock_water_meter", "mock_iot_gateway", "sample_climate_engine", "sample_pest_engine",
                       "sample_water_engine", "sample_iot_gateway"}
 PUBLIC_DATA_ADAPTERS = {"open_meteo_weather", "nasa_power_weather", "sentinel2_ndvi"}
-LIVE_KEYED_ADAPTERS = {"farmfuture_water_engine"}
+LIVE_KEYED_ADAPTERS = {"farmfuture_water_engine", "farmfuture_soil_microclimate", "farmfuture_pest_scouting",
+                       "farmfuture_satellite", "farmfuture_advisories", "farmfuture_weather"}
 
 
 def requires_mock_flag(adapter_code: str) -> bool | None:

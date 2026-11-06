@@ -104,9 +104,14 @@ status columns (submission / validation / review / verification), append-only `a
 
 | Source | Status in this build |
 |---|---|
-| FarmFuture Water Balance Engine (`water_management`) | Push endpoint ready; contract not confirmed – no live data |
-| FarmFuture Climate Intelligence Engine (`climate_intelligence`) | Placeholder adapter – refuses to run until API spec supplied |
-| FarmFuture Pest & Disease Prediction Engine (`pest_prediction`) | Placeholder adapter – refuses to run until API spec supplied |
+| FarmFuture Water Balance Engine (`farmfuture_water_engine`) | **Live, read-only (GET)** – irrigation plan / water account per linked farm; farm import |
+| FarmFuture soil & microclimate (`farmfuture_soil_microclimate`) | **Live, read-only (GET)** – device import; daily SoilSync / MicroClime statistics; soil lab reports |
+| FarmFuture pest & disease scouting (`farmfuture_pest_scouting`) | **Live, read-only (GET)** – app scouting → scouting / inspection records |
+| FarmFuture satellite (`farmfuture_satellite`) | **Live, read-only (GET)** – per-block NDVI / NDMI |
+| FarmFuture advisories (`farmfuture_advisories`) | **Live, read-only (GET)** – pest / disease / irrigation advisories (the FarmFuture API has no separate pest-prediction or climate-risk endpoint; its pest and disease warnings come from the advisory engine) |
+| FarmFuture weather (`farmfuture_weather`) | **Live, read-only (GET)** – MicroClime station days and the 5-day forecast → climate observations / forecasts |
+| FarmFuture Climate Intelligence Engine (`climate_intelligence`) | Placeholder adapter – the FarmFuture API has no climate-risk endpoint; refuses to run until one is supplied |
+| FarmFuture Pest & Disease Prediction Engine (`pest_prediction`) | Placeholder adapter – superseded by `farmfuture_advisories` + `farmfuture_pest_scouting` unless a dedicated risk API is supplied |
 | Mock water meter (`mock_water_meter`) | **MOCK** – synthetic paginated payloads with retry, duplicate and bad record |
 | Mock IoT gateway (`mock_iot_gateway`) | **MOCK** – SoilSync/Moisture Probe/MicroClime/RainSync style readings |
 

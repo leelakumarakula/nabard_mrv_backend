@@ -9,7 +9,9 @@ from app.schemas.common import ORMModel
 PayloadKind = Literal["measurements", "observations", "advisories"]
 AdapterCode = Literal["push_only", "unconfigured_rest", "mock_water_meter", "mock_iot_gateway", "open_meteo_weather",
                       "nasa_power_weather", "sentinel2_ndvi", "sample_climate_engine", "sample_pest_engine",
-                      "sample_water_engine", "sample_iot_gateway", "farmfuture_water_engine"]
+                      "sample_water_engine", "sample_iot_gateway", "farmfuture_water_engine",
+                      "farmfuture_soil_microclimate", "farmfuture_pest_scouting", "farmfuture_satellite",
+                      "farmfuture_advisories", "farmfuture_weather"]
 
 
 class SourceIn(BaseModel):
@@ -169,6 +171,14 @@ class FarmImportOut(BaseModel):
     already_imported: int
     with_location: int
     with_area: int
+    skipped: list[str]
+
+
+class DeviceImportOut(BaseModel):
+    farms: int
+    devices: int
+    devices_created: int
+    already_imported: int
     skipped: list[str]
 
 

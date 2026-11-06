@@ -19,7 +19,13 @@ NATURE_LABELS: dict[str, str] = {
 }
 
 RISK_LEVELS = ["low", "moderate", "high", "very_high"]
-PESTS = ["white_stem_borer", "coffee_berry_borer", "leaf_rust", "black_rot", "mealybug", "root_rot", "other"]
+PESTS = ["white_stem_borer", "coffee_berry_borer", "leaf_rust", "black_rot", "mealybug", "root_rot",
+         # coffee pests and diseases named by the FarmFuture advisory and scouting services
+         "shot_hole_borer", "stalk_rot", "leaf_miner", "cercospora_leaf_spot", "phoma", "anthracnose", "berry_blotch",
+         "other"]
+SENSOR_PARAMETERS = ["soil_moisture", "soil_temperature", "air_temperature", "humidity", "rainfall", "ph", "ec",
+                     "nitrogen", "phosphorus", "potassium", "air_pressure", "wind_speed", "leaf_wetness", "light_intensity"]
+SENSOR_UNITS = ["%", "°C", "mm", "pH", "dS/m", "µS/cm", "mg/kg", "kg/ha", "hPa", "m/s", "lux", "raw"]
 
 
 @dataclass(frozen=True)
@@ -260,7 +266,8 @@ RECORD_TYPES: list[RecordType] = [
          FieldSpec("severity_score", "Severity (0–5)", "integer", min=0, max=5,
                    help="Scale definition requires programme confirmation"),
          FieldSpec("scouting_method", "Scouting method", "text"),
-         FieldSpec("recommended_action", "Recommended action", "textarea")],
+         FieldSpec("recommended_action", "Recommended action", "textarea"),
+         FieldSpec("pest_other_name", "Pest / disease name (when 'other')", "text")],
         requires_plot=True, value_field="incidence_pct", default_activity_code="PEST_SURVEILLANCE",
         supports_surveillance_cluster=True, rules=[_affected_le_inspected],
     ),
@@ -276,19 +283,28 @@ RECORD_TYPES: list[RecordType] = [
          FieldSpec("nitrogen_kg_ha", "Available N", "number", unit="kg/ha", min=0),
          FieldSpec("phosphorus_kg_ha", "Available P", "number", unit="kg/ha", min=0),
          FieldSpec("potassium_kg_ha", "Available K", "number", unit="kg/ha", min=0),
-         FieldSpec("ec_ds_m", "Electrical conductivity", "number", unit="dS/m", min=0, max=20)],
+         FieldSpec("ec_ds_m", "Electrical conductivity", "number", unit="dS/m", min=0, max=20),
+         # Oxide basis as reported by some labs (e.g. FarmFuture soil reports); kept as reported, never converted.
+         FieldSpec("p2o5_kg_ha", "Available P₂O₅ (oxide basis)", "number", unit="kg/ha", min=0),
+         FieldSpec("k2o_kg_ha", "Available K₂O (oxide basis)", "number", unit="kg/ha", min=0),
+         FieldSpec("report_ref", "Lab report number", "text")],
         requires_plot=True, value_field="ph", default_activity_code="SOIL_HEALTH",
     ),
     RecordType(
         "sensor_observation", "soil", "Sensor observation",
         "A reading from a registered IoT device (SoilSync, Moisture Probe, MicroClime, RainSync).",
         "observed",
-        [FieldSpec("parameter", "Parameter", "select", required=True,
-                   options=["soil_moisture", "soil_temperature", "air_temperature", "humidity", "rainfall", "ph", "ec",
-                            "nitrogen", "phosphorus", "potassium"]),
+        [FieldSpec("parameter", "Parameter", "select", required=True, options=SENSOR_PARAMETERS),
          FieldSpec("value", "Value", "number", required=True),
-         FieldSpec("unit", "Unit", "select", required=True, options=["%", "°C", "mm", "pH", "dS/m", "mg/kg"]),
-         FieldSpec("quality_flag", "Device quality flag", "select", options=["ok", "suspect", "out_of_range", "calibration_due"])],
+         FieldSpec("unit", "Unit", "select", required=True, options=SENSOR_UNITS),
+         FieldSpec("quality_flag", "Device quality flag", "select", options=["ok", "suspect", "out_of_range", "calibration_due"]),
+         # Optional detail for summarised readings (e.g. FarmFuture daily device statistics)
+         FieldSpec("aggregation", "Aggregation", "select", options=["reading", "daily_mean", "daily_max"],
+                   help="A single reading, or a daily summary of the device's readings"),
+         FieldSpec("value_min", "Minimum in period", "number"),
+         FieldSpec("value_max", "Maximum in period", "number"),
+         FieldSpec("layer", "Sensor layer / depth", "text", help="e.g. L1 / L2 for two-depth soil-moisture probes"),
+         FieldSpec("source_dataset", "Source dataset", "text")],
         requires_device=True, value_field="value", unit_field="unit",
     ),
     # 5. Suitability
@@ -391,7 +407,8 @@ RECORD_TYPES: list[RecordType] = [
     # Satellite vegetation index at the plot point (module 5 – plantation condition, shade and canopy)
     RecordType(
         "vegetation_index", "suitability", "Satellite vegetation index",
-        "Vegetation greenness (NDVI) at the plot location from a cloud-free satellite scene (e.g. Sentinel-2).",
+        "Vegetation greenness (NDVI) at the plot location or averaged over a farm block, from a cloud-free satellite "
+        "scene (e.g. Sentinel-2).",
         "calculated",
         [FieldSpec("index", "Index", "select", required=True, options=["ndvi"]),
          FieldSpec("index_value", "Index value", "number", required=True, min=-1, max=1),
@@ -399,10 +416,18 @@ RECORD_TYPES: list[RecordType] = [
          FieldSpec("scene_id", "Scene ID", "text", required=True),
          FieldSpec("cloud_cover_pct", "Scene cloud cover", "number", unit="%", min=0, max=100),
          FieldSpec("pixel_class", "Pixel classification", "text"),
-         FieldSpec("pixel_size_m", "Pixel size", "number", unit="m", min=0)],
+         FieldSpec("pixel_size_m", "Pixel size", "number", unit="m", min=0),
+         # Block (zone) summaries, e.g. from the FarmFuture satellite service
+         FieldSpec("aggregation", "Aggregation", "select", options=["point", "zone_mean"]),
+         FieldSpec("zone_ref", "Farm block / zone reference", "text"),
+         FieldSpec("index_min", "Lowest cell value in block", "number", min=-1, max=1),
+         FieldSpec("index_max", "Highest cell value in block", "number", min=-1, max=1),
+         FieldSpec("ndmi_mean", "Moisture index (NDMI), block mean", "number", min=-1, max=1),
+         FieldSpec("cells_count", "Satellite cells in block", "integer", min=0),
+         FieldSpec("declining_cells", "Cells with declining greenness", "integer", min=0)],
         requires_plot=True, value_field="index_value",
-        caution="One satellite pixel at the plot point (it includes shade trees); an indication of canopy greenness, not "
-                "a field-verified plantation condition.",
+        caution="A satellite index for one pixel at the plot point or the mean over a farm block (both include shade "
+                "trees); an indication of canopy greenness, not a field-verified plantation condition.",
     ),
     # V2: demonstration-site visits (module 6 – plantation and soil/moisture demonstrations)
     RecordType(
@@ -429,7 +454,9 @@ DERIVED_FIELDS: dict[str, tuple[str, ...]] = {"pest_inspection": ("incidence_pct
 DEVICE_PARAMETERS: dict[str, set[str]] = {
     "soilsync_7in1": {"soil_moisture", "soil_temperature", "ph", "ec", "nitrogen", "phosphorus", "potassium"},
     "moisture_probe": {"soil_moisture", "soil_temperature"},
-    "microclime": {"air_temperature", "humidity"},
+    # FarmFuture MicroClime stations also report rain, pressure, wind, leaf wetness and light (seen in live data).
+    "microclime": {"air_temperature", "humidity", "rainfall", "air_pressure", "wind_speed", "leaf_wetness",
+                   "light_intensity"},
     "rainsync": {"rainfall"},
 }
 

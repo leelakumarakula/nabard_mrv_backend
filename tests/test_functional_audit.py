@@ -227,6 +227,8 @@ EXTRA_RULES = {
     # Programme-wide data needs access to every geography
     ("POST", "/api/v1/mrv/calculations"), ("POST", "/api/v1/indicators/{indicator_id}/preview"),
     ("GET", "/api/v1/reports/programme"),
+    # A farmer may read only the outline of their own plot (any other plot id is refused)
+    ("GET", "/api/v1/me/plots/{plot_id}/boundary"),
 }
 
 

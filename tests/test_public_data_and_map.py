@@ -149,9 +149,12 @@ def test_unavailable_service_is_reported_after_retries(api, http) -> None:
 
 
 def test_source_without_programme_is_explained(api) -> None:
-    code = _register(api, "sample_pest_engine", True, programme_code=None)
-    r = api.as_("admin").post(f"/integrations/{code}/pull")
+    # Refused when the source is saved, so a pull never meets a missing programme
+    r = api.as_("admin").post("/integrations/sources", json={
+        "source_code": "t_no_programme", "name": "No programme", "source_type": "rest_pull",
+        "adapter_code": "sample_pest_engine", "auth_type": "none", "is_mock": True, "config": {"programme_code": None}})
     assert r.status_code == 422 and r.json()["error"]["code"] == "source_config"
+    assert "Programme code is required" in r.json()["error"]["message"]
 
 
 @pytest.mark.parametrize(("adapter_code", "record_type", "nature"), [

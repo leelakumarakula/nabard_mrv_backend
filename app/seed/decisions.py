@@ -52,8 +52,11 @@ DECISIONS = [
      "Endline report disabled until the methodology is approved (setting reports.endline_methodology_approved).",
      ["Reports"]),
     ("FARMFUTURE_APIS", "integration", "FarmFuture engine availability and API contracts",
-     "Which FarmFuture capabilities exist, who owns them, and what are their API contracts and credentials?",
-     "Placeholder sources registered; mock adapters clearly labelled; no live data.", ["Integrations"]),
+     "Which FarmFuture capabilities exist, who owns them, and what are their API contracts and credentials? Is a "
+     "Climate Intelligence (drought / heat / excess-rain risk) API planned, with which risk levels and method?",
+     "Live read-only connectors for the water engine, soil & microclimate sensors, scouting, satellite, advisories and "
+     "weather / forecast (test token). The API has no climate-risk endpoint, so climate risk stays SAMPLE (DEMO).",
+     ["Integrations", "Climate module"]),
     ("IOT_SCHEDULE", "integration", "Final IoT equipment schedule and protocols",
      "Exact device models, quantities, protocols, payloads and calibration requirements?",
      "Device capability map and mock gateway are provisional; up to 1,200 devices is a planning ceiling.",
@@ -69,6 +72,18 @@ DECISIONS = [
      "After how many failed sign-ins, and for how long, should an account be locked or throttled?",
      "Failed sign-ins are recorded in the audit log; no lockout or throttling is applied yet.",
      ["Sign-in", "Security"]),
+    ("FARMFUTURE_SENSOR_UNITS", "integration", "Units and series of FarmFuture sensor data",
+     "FarmFuture does not state the units of soil EC, soil N/P/K and leaf wetness, nor which N/P/K series (raw, "
+     "calibrated or lab-anchored) and which daily rain figure are authoritative. Which apply?",
+     "Imported from FarmFuture's daily device statistics with EC in µS/cm, N/P/K in mg/kg, leaf wetness as a raw sensor "
+     "value and rain as the day's maximum (source config 'units'); all pending FarmFuture confirmation.",
+     ["Soil & microclimate module", "IoT devices"]),
+    ("FARMFUTURE_ADVISORY_DELIVERY", "integration", "Do FarmFuture app advisories count as delivered?",
+     "When the FarmFuture app shows an advisory on a farmer's farm, does it count as delivered (or read) for the "
+     "advisory-reach indicators, and do farmer-recorded app scouting records count as surveillance?",
+     "App advisories are recorded as sent only (not delivered or read), so they do not count towards reach; app scouting "
+     "is imported as scouting records marked 'FarmFuture app scouting'.",
+     ["Climate module", "Pest & disease module", "Indicators"]),
     ("FPO_REGISTRATION_GEOGRAPHY", "scope", "Geography of farmers registered by an FPO coordinator",
      "Must a farmer registered by an FPO/grower-group coordinator be located within that FPO's area?",
      "Allowed when the coordinator's FPO is the farmer's primary FPO; geography pickers offer the FPO's own area.",

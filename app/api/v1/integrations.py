@@ -17,6 +17,7 @@ from app.models import (
     FarmPlot,
     IntegrationFieldMapping,
     IntegrationSource,
+    Programme,
     QuarantinedRecord,
     SourceRecordMap,
     SyncRun,
@@ -24,6 +25,7 @@ from app.models import (
 from app.schemas.common import Message, Page, PageParams, page_of, paginate
 from app.schemas.integration import (
     BatchResultOut,
+    DeviceImportOut,
     DiscardIn,
     FarmImportIn,
     FarmImportOut,
@@ -52,6 +54,7 @@ from app.services.integration.adapters import (
     with_retry,
 )
 from app.services.integration.farmfuture import import_farms
+from app.services.integration.farmfuture_data import import_devices
 from app.services.integration.pipeline import process_batch
 
 router = APIRouter(prefix="/integrations", tags=["integrations"])
@@ -130,6 +133,18 @@ def receive_advisories(body: InboundBatch, ctx=Depends(inbound_actor), db: Sessi
     return _inbound("advisories", body, ctx, db)
 
 
+def _check_programme(db: Session, adapter_code: str, config: dict | None) -> None:
+    """Catalogue pull adapters file their records under config.programme_code, so it must name an existing programme."""
+    if not any(c["adapter_code"] == adapter_code for c in catalogue()):
+        return
+    code = str((config or {}).get("programme_code") or "").strip()
+    if not code:
+        raise AppError(422, "source_config", "Programme code is required for this adapter – enter the code shown on the "
+                                             "Programmes page (e.g. TEST-FF)")
+    if db.scalar(select(Programme.id).where(Programme.code == code)) is None:
+        raise AppError(422, "source_config", f"Programme code '{code}' does not exist – use a code from the Programmes page")
+
+
 def _check_mock_flag(adapter_code: str, is_mock: bool) -> None:
     """Synthetic adapters must be labelled mock and real-data adapters must not be, so data is never mislabelled."""
     required = requires_mock_flag(adapter_code)
@@ -156,6 +171,7 @@ def list_sources(current: CurrentUser = Depends(require("integration.read")), db
 def create_source(body: SourceIn, current: CurrentUser = Depends(require("integration.manage")),
                   db: Session = Depends(get_db)) -> SourceOut:
     _check_mock_flag(body.adapter_code, body.is_mock)
+    _check_programme(db, body.adapter_code, body.config)
     source = crud.create(db, current, IntegrationSource, body.model_dump(), "integration_source")
     db.commit()
     return _source_out(db, source)
@@ -172,6 +188,9 @@ def update_source(source_code: str, body: SourceUpdate, current: CurrentUser = D
     source = _source(db, source_code)
     if body.adapter_code is not None:
         _check_mock_flag(body.adapter_code, source.is_mock)
+    if body.adapter_code is not None or body.config is not None:
+        _check_programme(db, body.adapter_code or source.adapter_code,
+                         body.config if body.config is not None else source.config)
     source = crud.update(db, current, source, body, "integration_source")
     db.commit()
     return _source_out(db, source)
@@ -271,6 +290,16 @@ def import_source_farms(source_code: str, body: FarmImportIn, current: CurrentUs
     if not current.has("farmer.manage"):
         raise AppError(403, "forbidden", "Importing farms also needs the farmer.manage permission")
     return import_farms(db, current, _source(db, source_code), body.geo_unit_id, body.primary_fpo_id, body.test_label)
+
+
+@router.post("/sources/{source_code}/import-devices", response_model=DeviceImportOut)
+def import_source_devices(source_code: str, current: CurrentUser = Depends(require("integration.manage")),
+                          db: Session = Depends(get_db)) -> dict:
+    """Register the SoilSync / MicroClime devices of the linked FarmFuture farms in the device registry, linked by
+    identity maps. Read-only on the FarmFuture side."""
+    if not current.has("module.write"):
+        raise AppError(403, "forbidden", "Importing devices also needs the module.write permission")
+    return import_devices(db, current, _source(db, source_code))
 
 
 @router.post("/{source_code}/pull", response_model=BatchResultOut)

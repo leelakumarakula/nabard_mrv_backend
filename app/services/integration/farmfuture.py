@@ -75,7 +75,38 @@ def plan_attributes(plan: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-class FarmFutureWaterEngineAdapter(PlatformAdapter):
+class FarmFutureApi:
+    """Read-only access to the FarmFuture API shared by every FarmFuture adapter: token from settings, GET only."""
+
+    config: dict[str, Any]
+
+    def _init_api(self) -> None:
+        settings = get_settings()
+        if not settings.farmfuture_api_token:
+            raise AppError(422, "source_not_configured", "FARMFUTURE_API_TOKEN is not set in the server environment "
+                                                         "(.env). Add the token and restart the API.")
+        self.base_url = settings.farmfuture_api_base_url.rstrip("/")
+        self.headers = {"Authorization": f"Bearer {settings.farmfuture_api_token}", "Accept": "application/json",
+                        "User-Agent": USER_AGENT}
+
+    def client(self) -> httpx.Client:
+        return httpx.Client(transport=platform_adapters.HTTP_TRANSPORT, headers=self.headers,
+                            timeout=float(_int(self.config, "timeout_seconds", 60, 5, 120)))
+
+    def _request(self, client: httpx.Client, path: str, params: dict[str, Any] | None = None) -> httpx.Response:
+        try:
+            response = client.get(self.base_url + path, params=params)  # GET only – FarmFuture is never written to
+        except httpx.TransportError as exc:
+            raise TransientSourceError(f"FarmFuture: {type(exc).__name__}") from exc
+        if response.status_code == 429 or response.status_code >= 500:
+            raise TransientSourceError(f"FarmFuture returned HTTP {response.status_code}")
+        if response.status_code in (401, 403):
+            raise AppError(502, "source_auth", "FarmFuture refused the token (HTTP "
+                                               f"{response.status_code}) – it may have expired; replace FARMFUTURE_API_TOKEN")
+        return response
+
+
+class FarmFutureWaterEngineAdapter(FarmFutureApi, PlatformAdapter):
     uses_platform_codes = False  # FarmFuture farm ids resolve to plots through reviewed identity maps
     catalogue: ClassVar[dict[str, Any]] = {
         "name": "FarmFuture Water Balance Engine (live API, read-only)", "module_code": "water", "kind": "live_api",
@@ -88,30 +119,8 @@ class FarmFutureWaterEngineAdapter(PlatformAdapter):
 
     def __init__(self, db, source: IntegrationSource) -> None:
         super().__init__(db, source)
-        settings = get_settings()
-        if not settings.farmfuture_api_token:
-            raise AppError(422, "source_not_configured", "FARMFUTURE_API_TOKEN is not set in the server environment "
-                                                         "(.env). Add the token and restart the API.")
-        self.base_url = settings.farmfuture_api_base_url.rstrip("/")
-        self.headers = {"Authorization": f"Bearer {settings.farmfuture_api_token}", "Accept": "application/json",
-                        "User-Agent": USER_AGENT}
+        self._init_api()
         self._farms: list[str] | None = None
-
-    def client(self) -> httpx.Client:
-        return httpx.Client(transport=platform_adapters.HTTP_TRANSPORT, headers=self.headers,
-                            timeout=float(_int(self.config, "timeout_seconds", 60, 5, 120)))
-
-    def _request(self, client: httpx.Client, path: str, params: dict[str, Any] | None = None) -> httpx.Response:
-        try:
-            response = client.get(self.base_url + path, params=params)  # GET only – this adapter never writes
-        except httpx.TransportError as exc:
-            raise TransientSourceError(f"FarmFuture: {type(exc).__name__}") from exc
-        if response.status_code == 429 or response.status_code >= 500:
-            raise TransientSourceError(f"FarmFuture returned HTTP {response.status_code}")
-        if response.status_code in (401, 403):
-            raise AppError(502, "source_auth", "FarmFuture refused the token (HTTP "
-                                               f"{response.status_code}) – it may have expired; replace FARMFUTURE_API_TOKEN")
-        return response
 
     def mapped_farms(self, client: httpx.Client) -> list[str]:
         """FarmFuture farm ids the token can see that are mapped to a platform plot, in a stable order."""
@@ -304,7 +313,7 @@ def farm_boundary(db: Session, plot_id: uuid.UUID) -> dict[str, Any]:
         .join(IntegrationSource, IntegrationSource.id == SourceRecordMap.source_id)
         .where(SourceRecordMap.entity_type == "farm_plot", SourceRecordMap.internal_record_id == plot_id,
                IntegrationSource.adapter_code == "farmfuture_water_engine", IntegrationSource.enabled == true())
-        .order_by(SourceRecordMap.first_seen_at)).first()
+        .order_by(SourceRecordMap.first_seen_at)).first()  # farm import (and so farm links) live on the water source
     if row is None:
         return {"available": False, "reason": "not_linked"}
     farm_id, source = row
