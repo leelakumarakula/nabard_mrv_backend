@@ -1,12 +1,13 @@
 import uuid
+from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends
-from sqlalchemy import func, or_, select
+from sqlalchemy import Date, cast, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.core.deps import CurrentUser, require
 from app.db.session import get_db
-from app.models import Device, DeviceCalibration
+from app.models import Device, DeviceCalibration, FieldRecord
 from app.schemas.common import Page, PageParams, paginate
 from app.schemas.workstream import CalibrationIn, CalibrationOut, DeviceIn, DeviceOut, DeviceUpdate
 from app.services import crud
@@ -16,17 +17,54 @@ from app.services.scope import apply_scope
 router = APIRouter(prefix="/devices", tags=["devices"])
 
 
+COMPLETENESS_DAYS = 30
+READING_TYPES = ("sensor_observation", "climate_observation")
+
+
+def completeness(db: Session, devices: list[Device], days: int = COMPLETENESS_DAYS) -> dict[uuid.UUID, dict]:
+    """Per device: last reading, days with at least one stored reading in the last `days` days, the days it was
+    expected to report (since installation, until removal) and the latest battery / signal snapshot."""
+    ids = [d.id for d in devices] or [uuid.UUID(int=0)]
+    now = datetime.now(UTC)
+    since = now - timedelta(days=days)
+    last = dict(db.execute(select(FieldRecord.device_id, func.max(FieldRecord.observed_at)).where(
+        FieldRecord.device_id.in_(ids), FieldRecord.record_type.in_(READING_TYPES),
+        FieldRecord.validation_status != "rejected").group_by(FieldRecord.device_id)).all())
+    reporting = dict(db.execute(select(FieldRecord.device_id, func.count(func.distinct(cast(FieldRecord.observed_at, Date))))
+                                .where(FieldRecord.device_id.in_(ids), FieldRecord.record_type.in_(READING_TYPES),
+                                       FieldRecord.validation_status != "rejected", FieldRecord.observed_at >= since)
+                                .group_by(FieldRecord.device_id)).all())
+    health: dict[uuid.UUID, dict] = {}
+    for record in db.scalars(select(FieldRecord).where(FieldRecord.device_id.in_(ids),
+                                                       FieldRecord.record_type == "device_health")
+                             .order_by(FieldRecord.observed_at.desc())).unique():
+        health.setdefault(record.device_id, record.attributes or {})
+    out = {}
+    for d in devices:
+        start = max(since.date(), d.installed_on) if d.installed_on else since.date()
+        end = min(now.date(), d.removed_on) if d.removed_on else now.date()
+        expected = max(0, min(days, (end - start).days)) if d.status in ("active", "faulty") else 0
+        got = min(reporting.get(d.id, 0), expected) if expected else reporting.get(d.id, 0)
+        out[d.id] = {"last_reading_at": last.get(d.id), "reporting_days_30": got, "expected_days_30": expected,
+                     "completeness_pct": round(got / expected * 100, 1) if expected else None,
+                     "battery_pct": health.get(d.id, {}).get("battery_pct"),
+                     "signal_csq": health.get(d.id, {}).get("signal_csq")}
+    return out
+
+
 def _with_calibration(db: Session, devices: list[Device]) -> list[DeviceOut]:
     ids = [d.id for d in devices] or [uuid.UUID(int=0)]
     latest = {row.device_id: row for row in db.execute(
         select(DeviceCalibration.device_id, func.max(DeviceCalibration.calibrated_on).label("last"),
                func.max(DeviceCalibration.next_due_on).label("due"))
         .where(DeviceCalibration.device_id.in_(ids)).group_by(DeviceCalibration.device_id))}
+    data = completeness(db, devices)
     out = []
     for d in devices:
         row = latest.get(d.id)
         out.append(DeviceOut.model_validate(d).model_copy(update={
-            "last_calibrated_on": row.last if row else None, "calibration_due_on": row.due if row else None}))
+            "last_calibrated_on": row.last if row else None, "calibration_due_on": row.due if row else None,
+            **data[d.id]}))
     return out
 
 

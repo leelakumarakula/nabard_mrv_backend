@@ -3,6 +3,13 @@
 Only HTTP GET is ever sent to the FarmFuture API (through ``FarmFutureApi._request``):
   GET /api/Data/GetUserDevices/{farm_id}                  devices installed on a farm (device import)
   GET /api/Data/GetFarmStats?farmId=&startDate=&endDate=  daily min / max / mean per SoilSync and MicroClime device
+  GET /api/Data/GetMinMaxMean{,Calibrated,LabAnchored}     per-device daily statistics of another sensor series
+  GET /api/Data/GetAllSensorsLatestDataV2/{farm_id}       latest SoilSync reading time and battery (device health)
+  GET /api/Data/GetAllWeatherData?farmId=                 latest MicroClime reading time and battery (device health)
+  GET /api/Data/GetAllAnalogueWeatherData?farmId=         latest Analogue Weather reading, battery and signal
+  GET /api/Data/GetWeatherStats?macAddress=&parameter=    daily station rain history
+  GET /api/FarmProfile/{farm_id}                          terrain, soil and erosion profile of the farm (site characteristics)
+  GET /api/FarmProfile/{farm_id}/climate                  30-year climate normals of the farm location
   GET /api/SoilLabReport/GetByFarm/{farm_id}              soil lab reports
   GET /api/wsb/records?farm=                              field scouting records (plants inspected / with signs)
   GET /api/Satellite/ZoneSummary/{farm_id}                block (zone) NDVI / NDMI summary of the latest satellite pass
@@ -162,7 +169,22 @@ WEATHER_STATS: dict[str, tuple[str, str | None]] = {
 # Units FarmFuture does not state (leaf wetness has no unit in the app either); pending FarmFuture confirmation.
 DEFAULT_UNITS = {"leaf_wetness": "raw"}
 # FarmFuture deviceTypeId → platform device type, for the types whose readings were seen in live data.
-DEFAULT_DEVICE_TYPES = {"2": "soilsync_7in1", "4": "soilsync_7in1", "5": "microclime"}
+DEFAULT_DEVICE_TYPES = {"2": "soilsync_7in1", "4": "soilsync_7in1", "5": "microclime", "11": "analogue_weather"}
+# Analogue Weather latest-reading field → (platform parameter, unit). Pressure (0 = not measured), the running rain total
+# and the soil channels without a stated unit are not imported.
+ANALOGUE_READINGS = {"airTemperature": ("air_temperature", "°C"), "airHumidity": ("humidity", "%"),
+                     "windSpeed": ("wind_speed", "m/s"), "leafWetness": ("leaf_wetness", "raw"),
+                     "lux": ("light_intensity", "lux")}
+
+
+def _ff_time(value: Any) -> datetime | None:
+    """FarmFuture 'updateAt' ('2026-11-06 14:25:49', India time) → aware datetime."""
+    if not isinstance(value, str) or len(value) < 19:
+        return None
+    try:
+        return datetime.fromisoformat(value[:19].replace(" ", "T")).replace(tzinfo=IST)
+    except ValueError:
+        return None
 
 
 class FarmFutureSoilMicroclimateAdapter(FarmFutureFarmAdapter):
@@ -175,8 +197,10 @@ class FarmFutureSoilMicroclimateAdapter(FarmFutureFarmAdapter):
                        "FarmFuture' first. N/P/K are in kg/ha and EC in µS/cm (as labelled in the FarmFuture app); the "
                        "leaf-wetness unit is not stated. 'series' chooses which processing of pH, EC and N/P/K is "
                        "imported: app (default – the values the FarmFuture app shows), raw, calibrated or lab_anchored.",
-        "config": {"past_days": 3, "series": "app", "units": DEFAULT_UNITS, "device_types": DEFAULT_DEVICE_TYPES,
-                   "include_lab_reports": True, "include_reports_without_lab_name": False}}
+        "config": {"past_days": 3, "sensor_history_days": 30, "series": "app", "units": DEFAULT_UNITS,
+                   "device_types": DEFAULT_DEVICE_TYPES,
+                   "include_lab_reports": True, "include_reports_without_lab_name": False, "device_health": True,
+                   "analogue_readings": True}}
 
     def __init__(self, db: Session, source: IntegrationSource, require_devices: bool = True) -> None:
         super().__init__(db, source)
@@ -186,15 +210,31 @@ class FarmFutureSoilMicroclimateAdapter(FarmFutureFarmAdapter):
             raise AppError(422, "source_config", f"Unknown sensor series '{self.series}' – use one of "
                                                  + ", ".join(SERIES_LABELS))
         self.devices = farmfuture_devices(db)  # device links made by any FarmFuture source
+        self._imported_days: set[tuple[str, date]] | None = None
         if require_devices and not self.devices:
             raise AppError(422, "no_mapped_devices", "No FarmFuture device is linked to a platform device yet. Run "
                                                      "'Import devices from FarmFuture' on this source first.")
 
+    def imported_days(self) -> set[tuple[str, date]]:
+        """(MAC, day) pairs whose daily statistics this source already imported (from its idempotency records)."""
+        if self._imported_days is None:
+            self._imported_days = set()
+            for record_id in self.db.scalars(select(SourceRecordMap.source_record_id).where(
+                    SourceRecordMap.source_id == self.source.id, SourceRecordMap.entity_type == "field_record",
+                    SourceRecordMap.source_record_id.like("FF-SENS-%"))):
+                parts, day = record_id.split("-"), _day(record_id[-10:])
+                if len(parts) > 3 and day is not None:
+                    self._imported_days.add((parts[2], day))
+        return self._imported_days
+
     def farm_records(self, client: httpx.Client, link: FarmLink) -> list[dict[str, Any]]:
         end = today_ist() - timedelta(days=1)  # whole days only; today is still filling up
-        start = end - timedelta(days=_int(self.config, "past_days", 3, 1, 31) - 1)
+        recent = end - timedelta(days=_int(self.config, "past_days", 3, 1, 31) - 1)
+        # Earlier days (sensor_history_days) are filled in once: a day already imported for a device is not sent again.
+        start = min(recent, end - timedelta(days=_int(self.config, "sensor_history_days", 30, 0, 365) - 1))
         stats = self.get_data(client, "/api/Data/GetFarmStats", {
             "farmId": link.farm_id, "startDate": f"{start}T00:00:00", "endDate": f"{end}T23:59:59"}) or {}
+        done = self.imported_days() if start < recent else set()
         records: list[dict[str, Any]] = []
         for group, table in (("sensorDevices", SOIL_STATS), ("weatherDevices", WEATHER_STATS)):
             for device in (stats.get(group) or []) if isinstance(stats, dict) else []:
@@ -208,10 +248,67 @@ class FarmFutureSoilMicroclimateAdapter(FarmFutureFarmAdapter):
                     day = _day(day_text)
                     if day is None or not (start <= day <= end) or not isinstance(values, dict):
                         continue
+                    if day < recent and (device["macAddress"], day) in done:
+                        continue
                     for name, spec in table.items():
                         records.extend(self._reading(device_code, device["macAddress"], day, name, spec, values.get(name)))
         if self.config.get("include_lab_reports", True):
             records.extend(self._lab_reports(client, link))
+        if self.config.get("device_health", True) or self.config.get("analogue_readings", True):
+            records.extend(self._device_status(client, link))
+        return records
+
+    def _device_status(self, client: httpx.Client, link: FarmLink) -> list[dict[str, Any]]:
+        """Daily health snapshot (battery, signal, last reading) of every linked device, and the latest Analogue
+        Weather reading (that station type has no daily statistics in the API)."""
+        latest: list[tuple[dict[str, Any], float | None, int | None]] = []
+        if self.config.get("device_health", True):
+            for item in self.get_data(client, f"/api/Data/GetAllSensorsLatestDataV2/{link.farm_id}") or []:
+                latest.append((item, _num(((item or {}).get("soilProperties") or {}).get("voltage"), 1), None))
+            for item in self.get_data(client, "/api/Data/GetAllWeatherData", {"farmId": link.farm_id}) or []:
+                latest.append((item, _num((item or {}).get("voltage"), 1), None))
+        analogue = self.get_data(client, "/api/Data/GetAllAnalogueWeatherData", {"farmId": link.farm_id}) or []
+        records: list[dict[str, Any]] = []
+        for item in analogue if isinstance(analogue, list) else []:
+            if self.config.get("device_health", True):
+                signal = item.get("signalStrength") if isinstance(item.get("signalStrength"), int) else None
+                latest.append((item, _num(item.get("batteryPercentage"), 1), signal))
+            if self.config.get("analogue_readings", True):
+                records.extend(self._analogue_readings(item))
+        now = datetime.now(IST)
+        for item, battery, signal in latest:
+            mac = str((item or {}).get("macId") or "")
+            device_code = self.devices.get(mac)
+            when = _ff_time(item.get("updateAt")) if isinstance(item, dict) else None
+            if device_code is None or when is None:
+                continue
+            records.append({
+                "source_record_id": f"FF-HEALTH-{mac}-{when.date()}", "programme_code": self.programme.code,
+                "module_code": "soil", "record_type": "device_health", "device_code": device_code,
+                "observed_at": when.isoformat(), "attributes": {k: v for k, v in {
+                    "battery_pct": battery if battery is not None and 0 <= battery <= 100 else None, "signal_csq": signal,
+                    "reporting_now": now - when <= timedelta(hours=24),
+                    "source_name": "FarmFuture device status"}.items() if v is not None}})
+        return records
+
+    def _analogue_readings(self, item: dict[str, Any]) -> list[dict[str, Any]]:
+        mac = str(item.get("macId") or "")
+        device_code = self.devices.get(mac)
+        when = _ff_time(item.get("updateAt"))
+        if device_code is None or when is None:
+            return []
+        stamp = when.strftime("%Y%m%dT%H%M")
+        records = []
+        for field, (parameter, unit) in ANALOGUE_READINGS.items():
+            value = _num(item.get(field), 2)
+            if value is None:
+                continue
+            records.append({
+                "source_record_id": f"FF-SENS-{mac}-{parameter}-{stamp}", "programme_code": self.programme.code,
+                "module_code": "soil", "record_type": "sensor_observation", "device_code": device_code,
+                "observed_at": when.isoformat(), "attributes": {
+                    "parameter": parameter, "value": value, "unit": unit, "aggregation": "reading", "series": "app",
+                    "source_dataset": "FarmFuture latest Analogue Weather reading"}})
         return records
 
     def _series_stats(self, client: httpx.Client, mac: str, start: date, end: date,
@@ -599,16 +696,62 @@ class FarmFuturePestScoutingAdapter(FarmFutureFarmAdapter):
         return records
 
 
+# -- Workstream 5: satellite canopy condition per farm block, and the farm's site profile ----------------------------
+def site_attributes(profile: dict[str, Any]) -> dict[str, Any] | None:
+    """FarmFuture farm profile → site_characteristics attributes (no outline, points or device locations)."""
+    summary = profile.get("summary") or {}
+    terrain, soil = summary.get("terrain") or {}, summary.get("soil") or {}
+    erosion = (profile.get("hydrology") or {}).get("erosion") or {}
+    wetness = (profile.get("hydrology") or {}).get("wetness") or {}
+    if not terrain and not soil:
+        return None
+    classes = erosion.get("class_pct") or {}
+    severe = [v for k, v in classes.items() if k in ("severe", "very high") and isinstance(v, (int, float))]
+    return {
+        "source_name": "FarmFuture farm profile",
+        "data_basis": "Terrain model (elevation, slope, aspect, drainage), soil survey layers averaged over the farm, "
+                      "RUSLE soil-loss estimate; datasets not named by FarmFuture",
+        "elevation_mean_m": _num(terrain.get("elevation_mean_m"), 1), "elevation_min_m": _num(terrain.get("elevation_min_m"), 1),
+        "elevation_max_m": _num(terrain.get("elevation_max_m"), 1), "slope_mean_deg": _num(terrain.get("slope_mean_deg"), 2),
+        "slope_max_deg": _num(terrain.get("slope_max_deg"), 2), "slope_class": terrain.get("slope_class"),
+        "steep_share_pct": _num(terrain.get("steep_cell_pct"), 1), "aspect": terrain.get("aspect"),
+        "drainage_class": str(terrain.get("drainage") or "").replace("_", " ") or None,
+        "frost_risk": terrain.get("frost_risk"), "soil_texture": soil.get("texture"), "soil_ph": _num(soil.get("ph"), 2),
+        "clay_pct": _num(soil.get("clay"), 1), "sand_pct": _num(soil.get("sand"), 1), "silt_pct": _num(soil.get("silt"), 1),
+        "organic_carbon_pct": _num(soil.get("oc_pct"), 2), "bulk_density_g_cm3": _num(soil.get("bulk_density"), 2),
+        "field_capacity_pct": _num(soil.get("field_capacity"), 1), "water_holding_mm_per_m": _num(soil.get("whc_mm_per_m"), 0),
+        "water_holding_class": soil.get("whc_class"),
+        "erosion_mean_t_ha_yr": _num(erosion.get("rusle_mean_t_ha_yr"), 1),
+        "erosion_max_t_ha_yr": _num(erosion.get("rusle_max_t_ha_yr"), 1), "erosion_class": erosion.get("dominant_class"),
+        "erosion_severe_share_pct": round(sum(severe), 1) if severe else None,
+        "wetness_index_mean": _num(wetness.get("twi_mean"), 2), "saturation_prone_pct": _num(wetness.get("saturation_prone_pct"), 1),
+        "profile_built_on": (_day(profile.get("built_at")) or today_ist()).isoformat()}
+
+
 # -- Workstream 5: satellite canopy condition per farm block --------------------------------------------------------
 class FarmFutureSatelliteAdapter(FarmFutureFarmAdapter):
     catalogue: ClassVar[dict[str, Any]] = {
         "name": "FarmFuture satellite block greenness – NDVI / NDMI (live API, read-only)", "module_code": "suitability",
         "kind": "live_api", "default_source_code": "farmfuture_satellite", "owner": OWNER,
         "description": "Mean, lowest and highest NDVI, mean moisture index (NDMI) and declining cells for every block of "
-                       "the linked FarmFuture farms, from FarmFuture's latest cloud-free Sentinel-2 pass.",
-        "config": {}}
+                       "the linked FarmFuture farms, from FarmFuture's latest cloud-free Sentinel-2 pass; with "
+                       "'site_profile', each farm's terrain, soil and erosion (RUSLE) profile as site characteristics.",
+        "config": {"site_profile": True}}
 
     def farm_records(self, client: httpx.Client, link: FarmLink) -> list[dict[str, Any]]:
+        records = self._site_profile(client, link) if self.config.get("site_profile", True) else []
+        return records + self._zones(client, link)
+
+    def _site_profile(self, client: httpx.Client, link: FarmLink) -> list[dict[str, Any]]:
+        profile = self.get_data(client, f"/api/FarmProfile/{link.farm_id}")
+        attributes = site_attributes(profile) if isinstance(profile, dict) else None
+        if attributes is None:
+            return []
+        built = attributes["profile_built_on"]
+        return [self.observation(f"FF-SITE-{link.farm_id}-{built}", "site_characteristics", link.plot, attributes,
+                                 _noon(date.fromisoformat(built)))]
+
+    def _zones(self, client: httpx.Client, link: FarmLink) -> list[dict[str, Any]]:
         summary = self.get_data(client, f"/api/Satellite/ZoneSummary/{link.farm_id}") or {}
         day = _day(summary.get("observedOn")) if isinstance(summary, dict) else None
         if day is None or summary.get("status") != "ready" or not summary.get("zones"):

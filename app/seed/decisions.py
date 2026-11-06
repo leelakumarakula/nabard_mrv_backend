@@ -95,6 +95,14 @@ DECISIONS = [
      "of the days have a station reading (climate.rainfall_status_min_coverage_pct), otherwise 'insufficient data'; "
      "measured days are shown with every result. No status is treated as a drought warning yet.",
      ["Climate module", "Farm map", "Dashboard"]),
+    ("SOIL_SENSOR_THRESHOLDS", "indicators", "Optimal ranges for coffee soil and microclimate readings",
+     "Which ranges classify sensor readings as low / within range / high for coffee (pH, EC, N/P/K, soil moisture, "
+     "temperature, humidity, light)? FarmFuture's app and its get-advisory service use e.g. EC 2,000–4,000 µS/cm, "
+     "N 280–560, P 22–45, K 108–278 kg/ha, soil moisture 30–60 %, humidity 80–90 % – some look unsuitable for coffee "
+     "soils (every reading would be 'low' EC).",
+     "No low/high classification is applied; readings are stored as measured. FarmFuture's get-advisory classification "
+     "is not imported (tested 6 Nov 2026 – stateless, nothing changed in FarmFuture) until ranges are approved.",
+     ["Soil & microclimate module", "Advisories"]),
     ("FPO_REGISTRATION_GEOGRAPHY", "scope", "Geography of farmers registered by an FPO coordinator",
      "Must a farmer registered by an FPO/grower-group coordinator be located within that FPO's area?",
      "Allowed when the coordinator's FPO is the farmer's primary FPO; geography pickers offer the FPO's own area.",

@@ -413,6 +413,20 @@ RECORD_TYPES: list[RecordType] = [
                         "reporting is a pending programme decision)")],
         requires_device=True, value_field="value", unit_field="unit",
     ),
+    RecordType(
+        "device_health", "soil", "Device health snapshot",
+        "Battery, signal and last-reading time of a registered device as reported by its platform – one snapshot per "
+        "device and day. Used for data-completeness and maintenance follow-up, not as a field measurement.",
+        "observed",
+        [FieldSpec("battery_pct", "Battery", "number", unit="%", min=0, max=100),
+         FieldSpec("signal_csq", "Signal strength (CSQ 0–31)", "integer", min=0, max=31,
+                   help="Cellular signal quality: 0–9 marginal, 10–14 OK, 15–19 good, 20–31 excellent"),
+         FieldSpec("reporting_now", "Reading received in the last 24 hours", "boolean"),
+         FieldSpec("source_name", "Reported by", "text", required=True)],
+        requires_device=True, value_field="battery_pct",
+        caution="The time of the record is the device's last reading. A battery of 0 % while readings still arrive "
+                "usually means the battery sensor is not wired, not an empty battery.",
+    ),
     # 5. Suitability
     RecordType(
         "suitability_assessment", "suitability", "Suitability assessment",
@@ -499,6 +513,45 @@ RECORD_TYPES: list[RecordType] = [
         requires_plot=True, value_field="canopy_cover_pct", default_activity_code="SHADE_CANOPY",
     ),
     RecordType(
+        "site_characteristics", "suitability", "Site characteristics (terrain, soil, erosion)",
+        "Terrain, soil and erosion profile of a plot from a farm-profile service (elevation and slope from a terrain model, "
+        "soil from soil survey layers, erosion from the RUSLE soil-loss equation). Inputs for suitability and for "
+        "targeting soil and water conservation – an assessment, not a field survey.",
+        "assessment",
+        [FieldSpec("source_name", "Source", "text", required=True),
+         FieldSpec("data_basis", "Datasets / method", "text"),
+         FieldSpec("elevation_mean_m", "Average elevation", "number", unit="m", min=-100, max=6000),
+         FieldSpec("elevation_min_m", "Lowest point", "number", unit="m", min=-100, max=6000),
+         FieldSpec("elevation_max_m", "Highest point", "number", unit="m", min=-100, max=6000),
+         FieldSpec("slope_mean_deg", "Average slope", "number", unit="°", min=0, max=90),
+         FieldSpec("slope_max_deg", "Steepest slope", "number", unit="°", min=0, max=90),
+         FieldSpec("slope_class", "Slope class", "text"),
+         FieldSpec("steep_share_pct", "Share steeper than 15°", "number", unit="%", min=0, max=100),
+         FieldSpec("aspect", "Main aspect", "text"),
+         FieldSpec("drainage_class", "Drainage", "text"),
+         FieldSpec("frost_risk", "Frost risk", "text"),
+         FieldSpec("soil_texture", "Soil texture", "text"),
+         FieldSpec("soil_ph", "Soil pH (survey layers)", "number", min=3, max=10),
+         FieldSpec("clay_pct", "Clay", "number", unit="%", min=0, max=100),
+         FieldSpec("sand_pct", "Sand", "number", unit="%", min=0, max=100),
+         FieldSpec("silt_pct", "Silt", "number", unit="%", min=0, max=100),
+         FieldSpec("organic_carbon_pct", "Organic carbon", "number", unit="%", min=0, max=20),
+         FieldSpec("bulk_density_g_cm3", "Bulk density", "number", unit="g/cm³", min=0, max=3),
+         FieldSpec("field_capacity_pct", "Field capacity", "number", unit="%", min=0, max=100),
+         FieldSpec("water_holding_mm_per_m", "Water holding capacity", "number", unit="mm/m", min=0, max=1000),
+         FieldSpec("water_holding_class", "Water holding class", "text"),
+         FieldSpec("erosion_mean_t_ha_yr", "Average soil loss (RUSLE)", "number", unit="t/ha/yr", min=0),
+         FieldSpec("erosion_max_t_ha_yr", "Highest soil loss (RUSLE)", "number", unit="t/ha/yr", min=0),
+         FieldSpec("erosion_class", "Main erosion class", "text"),
+         FieldSpec("erosion_severe_share_pct", "Share in severe or very high erosion", "number", unit="%", min=0, max=100),
+         FieldSpec("wetness_index_mean", "Topographic wetness index (average)", "number", min=0, max=50),
+         FieldSpec("saturation_prone_pct", "Share prone to waterlogging", "number", unit="%", min=0, max=100),
+         FieldSpec("profile_built_on", "Profile built on", "date")],
+        requires_plot=True, value_field="erosion_mean_t_ha_yr", long_term_baseline=True,
+        caution="Modelled from terrain and soil datasets for the farm outline; confirm on the ground before using it to "
+                "select or exclude a site.",
+    ),
+    RecordType(
         "plantation_survival_check", "suitability", "Young plantation survival check",
         "Survival count for young plants where survival tracking is defined.",
         "observed",
@@ -564,6 +617,9 @@ DEVICE_PARAMETERS: dict[str, set[str]] = {
     "microclime": {"air_temperature", "humidity", "rainfall", "air_pressure", "wind_speed", "leaf_wetness",
                    "light_intensity"},
     "rainsync": {"rainfall"},
+    # FarmFuture Analogue Weather stations: only the readings whose unit is clear (pressure 0 = not measured; rain is a
+    # running total; its soil temperature / moisture channels have no stated unit) – see FARMFUTURE_SENSOR_UNITS.
+    "analogue_weather": {"air_temperature", "humidity", "wind_speed", "leaf_wetness", "light_intensity"},
 }
 
 ACTIVITIES: list[tuple[str, str, str]] = [

@@ -1,5 +1,5 @@
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import false, func, or_, select, true
@@ -14,6 +14,7 @@ from app.models import (
     BeneficiaryCategory,
     CommunityResourcePerson,
     DemonstrationSite,
+    Device,
     Farmer,
     FarmerCategoryAssignment,
     FieldRecord,
@@ -184,6 +185,14 @@ def dashboard(programme_id: uuid.UUID | None = None, current: CurrentUser = Depe
         exceptions = _count(db, apply_scope(select(FieldRecord.id).where(FieldRecord.validation_status.in_(["exception", "rejected"])),
                                             current, FieldRecord.geo_unit_id, FieldRecord.organisation_id))
         out.setdefault("data_quality", {})["workstream_exceptions"] = exceptions
+        active = apply_scope(select(Device.id).where(Device.status == "active"), current, Device.geo_unit_id,
+                             Device.organisation_id)
+        week = datetime.now(UTC) - timedelta(days=7)
+        reporting = apply_scope(select(Device.id).where(Device.status == "active", Device.id.in_(
+            select(FieldRecord.device_id).where(FieldRecord.record_type.in_(("sensor_observation", "climate_observation")),
+                                                FieldRecord.observed_at >= week))), current, Device.geo_unit_id,
+                                Device.organisation_id)
+        out["devices"] = {"active": _count(db, active), "reporting_7d": _count(db, reporting)}
     if current.has("module.read") and programme:
         out["rainfall"] = _rainfall_summary(db, current, programme)
     if current.has("monitoring.read"):

@@ -14,7 +14,7 @@ from sqlalchemy import select
 from app.core.config import get_settings
 from app.models import Advisory, AdvisoryDelivery, Device, FarmPlot, FieldRecord, GeoUnit, IntegrationSource
 from app.services.integration import platform_adapters
-from app.services.integration.farmfuture_data import advisory_module, forecast_days, scouting_pest
+from app.services.integration.farmfuture_data import advisory_module, forecast_days, scouting_pest, site_attributes
 from app.services.integration.platform_adapters import IST, today_ist
 
 PROGRAMME = "CCRL-INCLUSIVE"
@@ -23,6 +23,7 @@ FARM_B = "22222222-2222-4222-8222-222222222222"
 ESTATE = "33333333-3333-4333-8333-333333333333"
 ZONE = "44444444-4444-4444-8444-444444444444"
 SOIL_MAC, CLIME_MAC, HUB_MAC, STRAY_MAC = "A0B765293650", "78421CA2A790", "2805A52F3914", "FFFFFFFFFFFF"
+ANALOGUE_MAC = "E86BEAFAB9B4"
 
 
 def _stats(day: str, today: str) -> dict:
@@ -71,6 +72,19 @@ def _climate() -> dict:
             "annual_temperature": {"mean_c": 21.62, "mean_min_c": 18.43, "mean_max_c": 26.55}}
 
 
+def _profile() -> dict:
+    """FarmFuture farm profile summary and hydrology in the live shape (outline, points and devices are never stored)."""
+    return {"built_at": "2026-09-22T06:38:48+00:00", "ring": [[75.39, 13.36]], "terrain_points": [{"lat": 13.36, "lon": 75.39}],
+            "summary": {"terrain": {"elevation_mean_m": 876.3, "elevation_min_m": 861.5, "elevation_max_m": 894.0,
+                                    "slope_mean_deg": 5.71, "slope_max_deg": 11.44, "slope_class": "gentle", "steep_cell_pct": 0.0,
+                                    "aspect": "S", "drainage": "imperfectly_drained", "frost_risk": "low-medium"},
+                        "soil": {"ph": 5.1, "texture": "Clay loam", "clay": 39.0, "sand": 35.5, "silt": 25.5, "oc_pct": 1.75,
+                                 "bulk_density": 1.12, "field_capacity": 36.833, "whc_class": "high", "whc_mm_per_m": 212.0}},
+            "hydrology": {"erosion": {"rusle_mean_t_ha_yr": 65.33, "rusle_max_t_ha_yr": 241.85, "dominant_class": "severe",
+                                      "class_pct": {"severe": 62.5, "very high": 25.0, "moderate": 5.4, "slight": 5.4}},
+                          "wetness": {"twi_mean": 7.21, "saturation_prone_pct": 21.4}}}
+
+
 def _advisory(run_date: str, generated: str, items: list[dict]) -> dict:
     return {"farmId": FARM_A, "runDate": run_date, "generatedAt": generated, "isStale": False, "items": items,
             "delivery": {"shown": [i["id"] for i in items], "more": []}}
@@ -87,7 +101,10 @@ def farmfuture(monkeypatch):
     """Fake FarmFuture API covering farm import and the farm-data endpoints; records every request."""
     yesterday, today = (today_ist() - timedelta(days=1)).isoformat(), today_ist().isoformat()
     older = (today_ist() - timedelta(days=3)).isoformat()
-    state: dict = {"requests": [], "yesterday": yesterday, "older": older}
+    now = datetime.now(IST)
+    state: dict = {"requests": [], "yesterday": yesterday, "older": older,
+                   "recent": (now - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S"),
+                   "stale": (now - timedelta(days=2)).strftime("%Y-%m-%d %H:%M:%S")}
     monkeypatch.setattr(get_settings(), "farmfuture_api_token", "test-token")
     ok = lambda data: httpx.Response(200, json={"succeeded": True, "data": data})  # noqa: E731
 
@@ -102,7 +119,7 @@ def farmfuture(monkeypatch):
         if path.endswith("/climate"):
             return httpx.Response(404, json={"detail": "No climate profile"})
         if path.startswith("/api/FarmProfile/"):
-            return httpx.Response(200, json={"center": [75.39, 13.36], "crop_type": "arabica"})
+            return httpx.Response(200, json={"center": [75.39, 13.36], "crop_type": "arabica", **_profile()})
         if path.endswith("/irrigation-plan"):
             return httpx.Response(200, json={"farm": {"area_ha": 2.0}})
         if path == f"/api/Data/GetUserDevices/{FARM_A}":
@@ -110,10 +127,26 @@ def farmfuture(monkeypatch):
                         "createdDate": "2025-06-16T18:14:34Z", "isCallibrated": False},
                        {"macAdress": CLIME_MAC, "deviceTypeId": 5, "deviceName": "Farmfuture MicroClime",
                         "createdDate": "2025-06-16T18:13:18Z", "isCallibrated": True},
+                       {"macAdress": ANALOGUE_MAC, "deviceTypeId": 11, "deviceName": "Analogue Weather "},
                        {"macAdress": HUB_MAC, "deviceTypeId": 1, "deviceName": "Hub"}])
+        if path == f"/api/Data/GetAllSensorsLatestDataV2/{FARM_A}":
+            return ok([{"macId": SOIL_MAC, "deviceName": "Soilsync Hub", "updateAt": state["recent"], "lat": 12.0011,
+                        "soilProperties": {"voltage": 100, "ph": 5.3}}])
+        if path == "/api/Data/GetAllWeatherData" and params["farmId"] == FARM_A:
+            return ok([{"macId": CLIME_MAC, "deviceName": "Farmfuture MicroClime", "updateAt": state["stale"], "voltage": 97.5}])
+        if path == "/api/Data/GetAllAnalogueWeatherData" and params["farmId"] == FARM_A:
+            return ok([{"macId": ANALOGUE_MAC, "deviceName": "Analogue Weather ", "updateAt": state["recent"],
+                        "airTemperature": 26.3, "airHumidity": 80.05, "airPressure": 0, "windSpeed": 3.17, "leafWetness": 3160,
+                        "lux": 5401.3, "rainfall": 12.0, "batteryPercentage": 0, "signalStrength": 17, "soilTemperature": -1,
+                        "moisture1": 53, "moisture2": 2294}])
+        if path in ("/api/Data/GetAllWeatherData", "/api/Data/GetAllAnalogueWeatherData"):
+            return ok([])
         if path == "/api/Data/GetFarmStats":
             if params["farmId"] == FARM_A:
-                return ok(_stats(yesterday, today))
+                stats = _stats(yesterday, today)
+                if state.get("soil_history"):  # an earlier day inside sensor_history_days
+                    stats["sensorDevices"][0]["stats"][older] = stats["sensorDevices"][0]["stats"][yesterday]
+                return ok(stats)
             # optionally FARM_B lists FARM_A's weather station too (seen live: one station on two FarmFuture farms)
             shared = _stats(yesterday, today)["weatherDevices"] if state.get("share_station") else []
             return ok({"sensorDevices": [], "weatherDevices": shared})
@@ -195,6 +228,11 @@ def _records(db, code: str) -> list[FieldRecord]:
     return list(db.scalars(select(FieldRecord).where(FieldRecord.source_system_id == source_id)).unique())
 
 
+def test_site_attributes_need_a_profile() -> None:
+    assert site_attributes({"summary": {}}) is None
+    assert site_attributes(_profile())["erosion_mean_t_ha_yr"] == 65.3
+
+
 def test_mapping_helpers() -> None:
     assert scouting_pest("shothole") == ("shot_hole_borer", None)
     assert scouting_pest("Coffee Leaf Rust") == ("leaf_rust", None)
@@ -213,21 +251,33 @@ def test_device_import_and_daily_sensor_pull(api, db, farmfuture) -> None:
     assert api.as_("admin").post(f"/integrations/{code}/pull").json()["error"]["code"] == "no_mapped_devices"
 
     out = api.as_("admin").post(f"/integrations/sources/{code}/import-devices").json()
-    assert (out["devices_created"], out["already_imported"], len(out["skipped"])) == (2, 0, 1), out
+    assert (out["devices_created"], out["already_imported"], len(out["skipped"])) == (3, 0, 1), out
     assert "type 1" in out["skipped"][0]  # the hub has no platform device type
     soil = db.scalar(select(Device).where(Device.device_code == f"FF-{SOIL_MAC}"))
     assert soil.device_type == "soilsync_7in1" and soil.farm_plot_id == plot.id and soil.status == "active"
     assert db.scalar(select(Device.device_type).where(Device.device_code == f"FF-{CLIME_MAC}")) == "microclime"
+    assert db.scalar(select(Device.device_type).where(Device.device_code == f"FF-{ANALOGUE_MAC}")) == "analogue_weather"
     again = api.as_("admin").post(f"/integrations/sources/{code}/import-devices").json()
-    assert (again["devices_created"], again["already_imported"]) == (0, 2)
+    assert (again["devices_created"], again["already_imported"]) == (0, 3)
 
     farmfuture["requests"].clear()
     run = api.as_("admin").post(f"/integrations/{code}/pull").json()["sync_run"]
-    # soil: L1, L2, soil temperature, EC, N, P, K (pH all-zero = offline, skipped); microclime: 7; lab report: 1
-    assert (run["records_accepted"], run["records_rejected"]) == (15, 0), run
+    # soil: L1, L2, soil temperature, EC, N, P, K (pH all-zero = offline, skipped); microclime: 7; lab report: 1;
+    # device health: 3 snapshots; Analogue Weather: 5 latest readings (pressure 0, running rain, soil channels skipped)
+    assert (run["records_accepted"], run["records_rejected"]) == (23, 0), run
     assert {r.method for r in farmfuture["requests"]} == {"GET"}
     records = _records(db, code)
-    readings = {(r.attributes["parameter"], r.attributes.get("layer")): r for r in records if r.record_type == "sensor_observation"}
+    analogue = {r.attributes["parameter"]: r for r in records
+                if r.record_type == "sensor_observation" and r.attributes.get("aggregation") == "reading"}
+    assert set(analogue) == {"air_temperature", "humidity", "wind_speed", "leaf_wetness", "light_intensity"}
+    assert analogue["wind_speed"].unit == "m/s" and float(analogue["leaf_wetness"].value) == 3160
+    health = {r.device.device_code: r for r in records if r.record_type == "device_health"}
+    assert health[f"FF-{ANALOGUE_MAC}"].attributes == {"battery_pct": 0.0, "signal_csq": 17, "reporting_now": True,
+                                                         "source_name": "FarmFuture device status"}
+    assert health[f"FF-{CLIME_MAC}"].attributes["reporting_now"] is False  # last reading two days ago
+    assert health[f"FF-{SOIL_MAC}"].attributes["battery_pct"] == 100.0
+    readings = {(r.attributes["parameter"], r.attributes.get("layer")): r for r in records
+                if r.record_type == "sensor_observation" and r.attributes.get("aggregation") != "reading"}
     assert ("ph", None) not in readings and all(r.observed_at.date().isoformat() == farmfuture["yesterday"]
                                                 for r in readings.values())
     rain = readings[("rainfall", None)]
@@ -245,12 +295,18 @@ def test_device_import_and_daily_sensor_pull(api, db, farmfuture) -> None:
     assert "phosphorus_kg_ha" not in lab.attributes and lab.attributes["report_ref"] == "SL-7"
 
     run = api.as_("admin").post(f"/integrations/{code}/pull").json()["sync_run"]
-    assert (run["records_accepted"], run["records_duplicate"]) == (0, 15)
+    assert (run["records_accepted"], run["records_duplicate"]) == (0, 23)
+
+    devices = {d["device_code"]: d for d in api.as_("admin").get("/devices", params={"search": "FF-"}).json()["items"]}
+    soil = devices[f"FF-{SOIL_MAC}"]  # one day with readings, installed long ago → 1 of 30 expected days
+    assert (soil["reporting_days_30"], soil["expected_days_30"], soil["battery_pct"]) == (1, 30, 100.0)
+    assert devices[f"FF-{ANALOGUE_MAC}"]["signal_csq"] == 17 and devices[f"FF-{ANALOGUE_MAC}"]["last_reading_at"]
 
 
 def test_sensor_series_choice_and_implausible_readings(api, db, farmfuture) -> None:
     _link_farms(api, db)
-    code = _register(api, "farmfuture_soil_microclimate", past_days=1, series="calibrated", include_lab_reports=False)
+    code = _register(api, "farmfuture_soil_microclimate", past_days=1, series="calibrated", include_lab_reports=False,
+                     device_health=False, analogue_readings=False)
     api.as_("admin").post(f"/integrations/sources/{code}/import-devices")
     run = api.as_("admin").post(f"/integrations/{code}/pull").json()["sync_run"]
     # soil: L1, L2, soil temperature (app series) + N, pH (calibrated series; EC/P/K not supplied → left out); microclime: 7
@@ -289,6 +345,21 @@ def test_water_plan_block_and_sensor_detail() -> None:
     assert plan_attributes({"today": {"sensor": {"available": False, "difference_pct": 5}}})["sensor_difference_pct"] is None
 
 
+def test_sensor_history_is_filled_in_once(api, db, farmfuture) -> None:
+    _link_farms(api, db)
+    code = _register(api, "farmfuture_soil_microclimate", past_days=1, include_lab_reports=False, device_health=False,
+                     analogue_readings=False)
+    api.as_("admin").post(f"/integrations/sources/{code}/import-devices")
+    farmfuture["soil_history"] = True
+    run = api.as_("admin").post(f"/integrations/{code}/pull").json()["sync_run"]
+    assert (run["records_accepted"], run["records_rejected"]) == (21, 0), run  # (7 soil + 7 weather) yesterday + 7 soil earlier
+    asked = next(r for r in farmfuture["requests"] if r.url.path == "/api/Data/GetFarmStats").url.params
+    assert asked["startDate"].startswith((today_ist() - timedelta(days=30)).isoformat())
+    farmfuture["requests"].clear()
+    run = api.as_("admin").post(f"/integrations/{code}/pull").json()["sync_run"]
+    assert (run["records_accepted"], run["records_duplicate"]) == (0, 14)  # the earlier day is not sent again
+
+
 def test_forecast_days_are_whole_ist_days_in_celsius() -> None:
     days = forecast_days(_forecast(), today_ist())
     assert [d["forecast_date"] for d in days] == [today_ist() + timedelta(days=1)]  # today and the part day dropped
@@ -300,14 +371,14 @@ def test_forecast_days_are_whole_ist_days_in_celsius() -> None:
 def test_weather_station_days_and_forecast(api, db, farmfuture) -> None:
     plot = _link_farms(api, db)
     soil = _register(api, "farmfuture_soil_microclimate")
-    assert api.as_("admin").post(f"/integrations/sources/{soil}/import-devices").json()["devices_created"] == 2
+    assert api.as_("admin").post(f"/integrations/sources/{soil}/import-devices").json()["devices_created"] == 3
     # a second soil source re-uses the device links instead of skipping the devices
     second = api.as_("admin").post("/integrations/sources", json={
         "source_code": "t_soil_two", "name": "Second", "source_type": "rest_pull", "is_mock": False,
         "adapter_code": "farmfuture_soil_microclimate", "config": {"programme_code": PROGRAMME}})
     assert second.status_code == 201
     again = api.as_("admin").post("/integrations/sources/t_soil_two/import-devices").json()
-    assert (again["devices_created"], again["already_imported"]) == (0, 2)
+    assert (again["devices_created"], again["already_imported"]) == (0, 3)
     farmfuture["requests"].clear()
     farmfuture["share_station"] = True  # FARM_B also lists the station; it stays on the plot its device is registered on
 
@@ -381,8 +452,13 @@ def test_scouting_satellite_and_advisories(api, db, farmfuture) -> None:
 
     satellite = _register(api, "farmfuture_satellite")
     run = api.as_("admin").post(f"/integrations/{satellite}/pull").json()["sync_run"]
-    assert run["records_accepted"] == 1, run
-    ndvi = _records(db, satellite)[0]
+    assert run["records_accepted"] == 3, run  # FARM_A: zone NDVI + site profile; FARM_B: site profile
+    site = next(r for r in _records(db, satellite) if r.record_type == "site_characteristics" and r.farm_plot_id == plot.id)
+    s = site.attributes
+    assert (site.data_nature, float(site.value), s["erosion_class"], s["erosion_severe_share_pct"]) == ("assessment", 65.3, "severe", 87.5)
+    assert (s["elevation_mean_m"], s["drainage_class"], s["water_holding_mm_per_m"]) == (876.3, "imperfectly drained", 212.0)
+    assert "13.36" not in json.dumps(s) and site.validation_status == "valid"  # no outline, points or location stored
+    ndvi = next(r for r in _records(db, satellite) if r.record_type == "vegetation_index")
     assert ndvi.record_type == "vegetation_index" and float(ndvi.value) == 0.7665
     assert ndvi.attributes["scene_id"] == "S2C_MSIL2A_TEST_SCENE" and ndvi.attributes["ndmi_mean"] == 0.271
     assert (ndvi.attributes["zone_ref"], ndvi.attributes["declining_cells"]) == (ZONE, 3)

@@ -99,7 +99,7 @@ class ParticipantOut(ORMModel):
 
 class DeviceIn(BaseModel):
     device_code: str = Field(min_length=2, max_length=60)
-    device_type: Literal["soilsync_7in1", "moisture_probe", "microclime", "rainsync", "other"]
+    device_type: Literal["soilsync_7in1", "moisture_probe", "microclime", "rainsync", "analogue_weather", "other"]
     provider: str | None = None
     farm_plot_id: uuid.UUID | None = None
     geo_unit_id: uuid.UUID | None = None  # derived from the plot when given
@@ -139,6 +139,13 @@ class DeviceOut(ORMModel):
     is_demo: bool
     last_calibrated_on: date | None = None
     calibration_due_on: date | None = None
+    # Data completeness, from the readings stored in the platform (last 30 days) and the latest health snapshot
+    last_reading_at: datetime | None = None
+    reporting_days_30: int = 0
+    expected_days_30: int = 0
+    completeness_pct: float | None = None
+    battery_pct: float | None = None
+    signal_csq: int | None = None
 
 
 class CalibrationIn(BaseModel):
