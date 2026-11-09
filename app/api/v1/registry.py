@@ -279,18 +279,19 @@ def create_plot(farm_id: uuid.UUID, body: PlotIn, current: CurrentUser = Depends
 @router.get("/plots", response_model=Page[PlotLookupOut])
 def list_plots(params: PageParams = Depends(), search: str | None = None, farmer_id: uuid.UUID | None = None,
                current: CurrentUser = Depends(require("farmer.read")), db: Session = Depends(get_db)) -> dict:
-    stmt = (select(FarmPlot, Farm.farm_code, Farmer).join(Farm, Farm.id == FarmPlot.farm_id)
+    stmt = (select(FarmPlot, Farm.farm_code, Farm.name, Farmer).join(Farm, Farm.id == FarmPlot.farm_id)
             .join(Farmer, Farmer.id == Farm.farmer_id).where(FarmPlot.is_archived == false()).order_by(FarmPlot.plot_code))
     if search:
-        stmt = stmt.where(or_(FarmPlot.plot_code.ilike(f"%{search}%"), Farmer.full_name.ilike(f"%{search}%"),
+        stmt = stmt.where(or_(FarmPlot.plot_code.ilike(f"%{search}%"), Farm.name.ilike(f"%{search}%"),
+                              Farmer.full_name.ilike(f"%{search}%"),
                               Farmer.farmer_code.ilike(f"%{search}%")))
     if farmer_id:
         stmt = stmt.where(Farmer.id == farmer_id)
     stmt = apply_scope(stmt, current, Farmer.geo_unit_id, Farmer.primary_fpo_id)
     total = db.scalar(select(func.count()).select_from(stmt.order_by(None).subquery())) or 0
     rows = db.execute(stmt.offset((params.page - 1) * params.page_size).limit(params.page_size)).unique().all()
-    items = [PlotLookupOut(id=p.id, plot_code=p.plot_code, farm_code=fc, farmer_id=f.id, farmer_label=f.label,
-                           area=p.area, area_unit=p.area_unit) for p, fc, f in rows]
+    items = [PlotLookupOut(id=p.id, plot_code=p.plot_code, farm_code=fc, farm_name=fn, farmer_id=f.id,
+                           farmer_label=f.label, area=p.area, area_unit=p.area_unit) for p, fc, fn, f in rows]
     return {"items": items, "total": total, "page": params.page, "page_size": params.page_size}
 
 

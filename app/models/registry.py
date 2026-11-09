@@ -1,3 +1,4 @@
+import re
 import uuid
 from datetime import date
 from decimal import Decimal
@@ -94,4 +95,11 @@ class FarmPlot(Base, EntityBase, DemoMixin, ArchiveMixin):
 
     @property
     def label(self) -> str:
-        return self.plot_code
+        # The plot code is a stable ID but means nothing to people (FarmFuture plots are FF-<farm id>-P1), so a named
+        # farm's plot is shown by the farm's name alone; a farm's second and later plots add their number ("· P2").
+        # The code itself stays on the plot's own page and in the registry.
+        name = self.farm.name if self.farm else None
+        if not name:
+            return self.plot_code
+        number = re.search(r"-P(\d+)$", self.plot_code)
+        return name if number and number.group(1) == "1" else f"{name} · {number.group(0)[1:] if number else self.plot_code}"

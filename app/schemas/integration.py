@@ -180,6 +180,7 @@ class DeviceImportOut(BaseModel):
     devices: int
     devices_created: int
     already_imported: int
+    positions_updated: int = 0  # installed positions stored or refreshed from FarmFuture
     skipped: list[str]
 
 

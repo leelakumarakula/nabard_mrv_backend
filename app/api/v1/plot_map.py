@@ -10,10 +10,12 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import false, func, select
 from sqlalchemy.orm import Session
 
+from app.api.v1.devices import completeness
 from app.core.deps import CurrentUser, require
 from app.core.errors import AppError
 from app.db.session import get_db
-from app.models import Farm, Farmer, FarmPlot, FieldRecord, PracticeRecord, ProgrammeParticipation
+from app.models import Device, Farm, Farmer, FarmPlot, FieldRecord, PracticeRecord, ProgrammeParticipation
+from app.services.device_location import location_check, reporting_state
 from app.services.integration.farmfuture import farm_boundary
 from app.services.integration.platform_adapters import today_ist
 from app.services.scope import apply_scope
@@ -106,18 +108,36 @@ def map_plots(programme_id: uuid.UUID | None = None,
         if verification == "verified":
             practices[farmer_id]["verified"] += count
 
+    # IoT devices on these plots: status for everyone; the exact pin only with farmer.read_pii and a position that fits
+    devices = list(db.scalars(select(Device).where(Device.farm_plot_id.in_(plot_ids), Device.status != "removed")
+                              .order_by(Device.device_code)).unique())
+    health = completeness(db, devices)
+    by_plot: dict[uuid.UUID, list[dict[str, Any]]] = defaultdict(list)
+    for d in devices:
+        check = location_check(d)
+        by_plot[d.farm_plot_id].append({
+            "id": d.id, "device_code": d.device_code, "device_type": d.device_type, "status": d.status,
+            "reporting_state": reporting_state(d.status, health[d.id]["last_reading_at"]), **health[d.id], **check,
+            "latitude": float(d.latitude) if precise and check["location_check"] == "ok" else None,
+            "longitude": float(d.longitude) if precise and check["location_check"] == "ok" else None})
+
     plots = []
     for plot, farmer in rows:
         counts = practices.get(farmer.id, {})
         stage = next((s for s in ("verified", "observed", "reported", "recommended") if counts.get(s)), "none")
         plots.append({
-            "id": plot.id, "plot_code": plot.plot_code, "farmer_id": farmer.id, "farmer_label": farmer.label,
+            "id": plot.id, "plot_code": plot.plot_code, "farm_name": plot.farm.name, "farmer_id": farmer.id, "farmer_label": farmer.label,
             "area_label": farmer.geo_unit.label if farmer.geo_unit else None, "village": farmer.village,
             "latitude": _coordinate(plot.latitude, precise), "longitude": _coordinate(plot.longitude, precise),
             "area": plot.area, "area_unit": plot.area_unit, "crop": plot.crop, "plantation_stage": plot.plantation_stage,
             "is_demo": plot.is_demo, "practice_stage": stage, "practices": dict(counts), **latest.get(plot.id, {}),
+            "devices": by_plot.get(plot.id, []),
         })
-    return {"precise_locations": precise, "total": total, "truncated": total > len(plots), "plots": plots}
+    listed = [d for p in plots for d in p["devices"]]
+    return {"precise_locations": precise, "total": total, "truncated": total > len(plots), "plots": plots,
+            "devices": {"total": len(listed), "reporting": sum(d["reporting_state"] == "reporting" for d in listed),
+                        "on_map": sum(d["latitude"] is not None for d in listed),
+                        "position_flagged": sum(d["location_check"] == "far_from_plot" for d in listed)}}
 
 
 @router.get("/plots/{plot_id}/boundary")

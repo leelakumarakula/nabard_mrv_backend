@@ -185,6 +185,7 @@ class PlotLookupOut(BaseModel):
     id: uuid.UUID
     plot_code: str
     farm_code: str
+    farm_name: str | None = None
     farmer_id: uuid.UUID
     farmer_label: str
     area: Decimal | None

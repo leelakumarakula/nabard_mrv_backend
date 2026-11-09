@@ -39,6 +39,7 @@ from app.core.deps import CurrentUser
 from app.core.errors import AppError
 from app.models import Device, Farm, Farmer, FarmPlot, GeoUnit, IntegrationSource, SourceRecordMap
 from app.services import audit, crud
+from app.services.device_location import parse_position
 from app.services.integration.base import PageResult, TransientSourceError
 from app.services.integration.farmfuture import FarmFutureApi
 from app.services.integration.platform_adapters import IST, PlatformAdapter, _int, _noon, today_ist
@@ -378,14 +379,27 @@ def import_devices(db: Session, current: CurrentUser, source: IntegrationSource)
 
     Each device is placed on the plot linked to its FarmFuture farm and linked by a reviewed identity map (entity device,
     source id = MAC address). Device types without a platform equivalent (hub, air quality, analogue weather) are
-    listed as skipped. Re-running only adds devices not yet imported. Read-only on the FarmFuture side.
+    listed as skipped. Re-running adds devices not yet imported and refreshes every device's installed position
+    (FarmFuture lat / long; a position entered in the platform is kept). Read-only on the FarmFuture side.
     """
     if source.adapter_code != "farmfuture_soil_microclimate":
         raise AppError(422, "wrong_adapter", "Device import is available only for the FarmFuture soil & microclimate source")
     adapter = FarmFutureSoilMicroclimateAdapter(db, source, require_devices=False)
     types = {str(k): v for k, v in {**DEFAULT_DEVICE_TYPES, **(adapter.config.get("device_types") or {})}.items()}
     mapped = set(adapter.devices)  # already linked by this or another FarmFuture source
-    summary: dict[str, Any] = {"farms": 0, "devices": 0, "devices_created": 0, "already_imported": 0, "skipped": []}
+    summary: dict[str, Any] = {"farms": 0, "devices": 0, "devices_created": 0, "already_imported": 0,
+                               "positions_updated": 0, "skipped": []}
+    now = datetime.now(IST)
+
+    def place(device: Device, item: dict[str, Any]) -> None:
+        """Keep the device's installed position in step with FarmFuture (missing / zero positions are not stored)."""
+        position = parse_position(item.get("lat"), item.get("long"))
+        if position is None or device.location_source not in (None, "FarmFuture"):
+            return  # a position entered in the platform is not overwritten
+        if (device.latitude, device.longitude) != position:
+            crud.update(db, current, device, {"latitude": position[0], "longitude": position[1],
+                                              "location_source": "FarmFuture", "location_updated_at": now}, "device")
+            summary["positions_updated"] += 1
     try:
         with adapter.client() as client:
             for link in adapter.links():
@@ -398,6 +412,9 @@ def import_devices(db: Session, current: CurrentUser, source: IntegrationSource)
                     name = (item.get("deviceName") or "").strip() or mac
                     if mac in mapped:
                         summary["already_imported"] += 1
+                        known = db.scalar(select(Device).where(Device.device_code == adapter.devices.get(mac, f"FF-{mac}")))
+                        if known is not None:
+                            place(known, item)
                         continue
                     device_type = types.get(str(item.get("deviceTypeId")))
                     if device_type is None:
@@ -416,6 +433,7 @@ def import_devices(db: Session, current: CurrentUser, source: IntegrationSource)
                                                review_note="Re-linked by FarmFuture device import"))
                         mapped.add(mac)
                         summary["already_imported"] += 1
+                        place(existing, item)
                         continue
                     farmer = db.get(Farmer, db.scalar(select(Farm.farmer_id).where(Farm.id == link.plot.farm_id)))
                     device = crud.create(db, current, Device, {
@@ -426,6 +444,7 @@ def import_devices(db: Session, current: CurrentUser, source: IntegrationSource)
                         "notes": f"Imported from FarmFuture: {name[:120]} (device type {item.get('deviceTypeId')}, "
                                  f"calibrated in FarmFuture: {'yes' if item.get('isCallibrated') else 'no'})"},
                         "device", summary=f"Imported FarmFuture device {mac}")
+                    place(device, item)
                     db.add(SourceRecordMap(source_id=source.id, entity_type="device", source_record_id=mac,
                                            internal_record_id=device.id, mapped_by_id=current.id,
                                            review_note="Created by FarmFuture device import"))

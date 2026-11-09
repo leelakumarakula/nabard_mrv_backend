@@ -108,6 +108,8 @@ class DeviceIn(BaseModel):
     status: Literal["planned", "active", "faulty", "removed"] = "planned"
     deployment_justification: str | None = None
     notes: str | None = None
+    latitude: float | None = Field(default=None, ge=-90, le=90)  # installed position (both or neither)
+    longitude: float | None = Field(default=None, ge=-180, le=180)
 
 
 class DeviceUpdate(BaseModel):
@@ -119,6 +121,8 @@ class DeviceUpdate(BaseModel):
     status: Literal["planned", "active", "faulty", "removed"] | None = None
     deployment_justification: str | None = None
     notes: str | None = None
+    latitude: float | None = Field(default=None, ge=-90, le=90)
+    longitude: float | None = Field(default=None, ge=-180, le=180)
 
 
 class DeviceOut(ORMModel):
@@ -146,6 +150,14 @@ class DeviceOut(ORMModel):
     completeness_pct: float | None = None
     battery_pct: float | None = None
     signal_csq: int | None = None
+    reporting_state: str | None = None  # reporting | late | silent | faulty | planned | removed
+    # Installed position: coordinates only with farmer.read_pii; the check against the plot for everyone
+    latitude: float | None = None
+    longitude: float | None = None
+    location_source: str | None = None
+    location_updated_at: datetime | None = None
+    location_check: str | None = None  # ok | far_from_plot | plot_not_located | no_position
+    distance_from_plot_km: float | None = None
 
 
 class CalibrationIn(BaseModel):

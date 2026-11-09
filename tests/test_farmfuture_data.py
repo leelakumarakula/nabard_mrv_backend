@@ -123,15 +123,27 @@ def farmfuture(monkeypatch):
         if path.endswith("/irrigation-plan"):
             return httpx.Response(200, json={"farm": {"area_ha": 2.0}})
         if path == f"/api/Data/GetUserDevices/{FARM_A}":
+            # positions: SoilSync ~150 m from the farm point, MicroClime ~250 km away (a wrong position), Analogue unset
             return ok([{"macAdress": SOIL_MAC, "deviceTypeId": 4, "deviceName": "Soilsync Hub",
-                        "createdDate": "2025-06-16T18:14:34Z", "isCallibrated": False},
+                        "createdDate": "2025-06-16T18:14:34Z", "isCallibrated": False, "lat": 13.3612, "long": 75.3911},
                        {"macAdress": CLIME_MAC, "deviceTypeId": 5, "deviceName": "Farmfuture MicroClime",
-                        "createdDate": "2025-06-16T18:13:18Z", "isCallibrated": True},
-                       {"macAdress": ANALOGUE_MAC, "deviceTypeId": 11, "deviceName": "Analogue Weather "},
+                        "createdDate": "2025-06-16T18:13:18Z", "isCallibrated": True, "lat": 12.97, "long": 77.59},
+                       {"macAdress": ANALOGUE_MAC, "deviceTypeId": 11, "deviceName": "Analogue Weather ", "lat": 0, "long": 0},
                        {"macAdress": HUB_MAC, "deviceTypeId": 1, "deviceName": "Hub"}])
         if path == f"/api/Data/GetAllSensorsLatestDataV2/{FARM_A}":
             return ok([{"macId": SOIL_MAC, "deviceName": "Soilsync Hub", "updateAt": state["recent"], "lat": 12.0011,
                         "soilProperties": {"voltage": 100, "ph": 5.3}}])
+        if path == f"/api/Data/GetAllSensorsLatestData/{FARM_A}":  # the FarmFuture Sensors page (uncorrected reading)
+            npk = {"isNpkDisplayed": not state.get("npk_hidden"),
+                   "displayMessage": "Soil is dry at all levels. Water now." if state.get("npk_hidden")
+                   else "Soil moisture is optimal at both levels. Nutrient readings are accurate."}
+            return ok([{"macId": SOIL_MAC, "deviceName": "Soilsync Hub", "updateAt": "2026-11-09 14:25:37", "lat": 12.0011,
+                        "long": 76.05, "addOnId": 1, "moistureThresholdsResponse": npk,
+                        "soilProperties": {"soilMoisturePercentage1": 21.5, "soilMoisturePercentage2": 25,
+                                           "temperature": 27.70000076, "ph": 6.869999886, "electricalConductivity": 49,
+                                           "voltage": 100},
+                        "soilNutrients": {"nitrogen": 305, "phosphorous": 1230, "potassium": 278},
+                        "extraParameters": {"solarRadiation": 179, "lux": 0}}])
         if path == "/api/Data/GetAllWeatherData" and params["farmId"] == FARM_A:
             return ok([{"macId": CLIME_MAC, "deviceName": "Farmfuture MicroClime", "updateAt": state["stale"], "voltage": 97.5}])
         if path == "/api/Data/GetAllAnalogueWeatherData" and params["farmId"] == FARM_A:
@@ -542,3 +554,93 @@ def test_scouting_satellite_and_advisories(api, db, farmfuture) -> None:
     assert delivery.delivered_at is None and delivery.read_at is None  # never counted as delivered or read
 
     assert {r.method for r in farmfuture["requests"]} == {"GET"}
+
+
+def test_device_positions_on_the_map_with_privacy(api, db, farmfuture) -> None:
+    plot = _link_farms(api, db)
+    code = _register(api, "farmfuture_soil_microclimate")
+    out = api.as_("admin").post(f"/integrations/sources/{code}/import-devices").json()
+    assert (out["devices_created"], out["positions_updated"]) == (3, 2), out  # the unset (0, 0) position is not stored
+    ids = {mac: db.scalar(select(Device.id).where(Device.device_code == f"FF-{mac}"))
+           for mac in (SOIL_MAC, CLIME_MAC, ANALOGUE_MAC)}
+
+    soil = api.as_("admin").get(f"/devices/{ids[SOIL_MAC]}").json()
+    assert (soil["latitude"], soil["longitude"], soil["location_source"]) == (13.3612, 75.3911, "FarmFuture")
+    assert soil["location_check"] == "ok" and soil["distance_from_plot_km"] < 0.5
+    clime = api.as_("admin").get(f"/devices/{ids[CLIME_MAC]}").json()
+    assert clime["location_check"] == "far_from_plot" and clime["distance_from_plot_km"] > 200
+    assert api.as_("admin").get(f"/devices/{ids[ANALOGUE_MAC]}").json()["location_check"] == "no_position"
+    # an exact position is a precise location: hidden without farmer.read_pii, the check stays visible
+    hidden = api.as_("analyst").get(f"/devices/{ids[SOIL_MAC]}").json()
+    assert (hidden["latitude"], hidden["longitude"], hidden["location_check"]) == (None, None, "ok")
+    assert all(d["latitude"] is None for d in api.as_("analyst").get("/devices", params={"page_size": 200}).json()["items"])
+
+    def plot_devices(who: str) -> tuple[dict, dict]:
+        body = api.as_(who).get("/map/plots").json()
+        return {d["device_code"]: d for p in body["plots"] if p["id"] == str(plot.id) for d in p["devices"]}, body["devices"]
+    on_map, summary = plot_devices("admin")
+    assert on_map[f"FF-{SOIL_MAC}"]["latitude"] == 13.3612
+    assert on_map[f"FF-{CLIME_MAC}"]["latitude"] is None  # far from its farm: listed and flagged, not drawn
+    assert on_map[f"FF-{CLIME_MAC}"]["location_check"] == "far_from_plot"
+    assert on_map[f"FF-{SOIL_MAC}"]["reporting_state"] == "silent"  # no reading stored yet
+    assert summary["position_flagged"] >= 1 and summary["on_map"] >= 1
+    assert all(d["latitude"] is None for d in plot_devices("analyst")[0].values())
+
+    # a position entered in the platform is kept by later imports; half a position is refused
+    api.as_("admin").patch(f"/devices/{ids[SOIL_MAC]}", json={"latitude": 13.3605, "longitude": 75.3899})
+    again = api.as_("admin").post(f"/integrations/sources/{code}/import-devices").json()
+    assert again["positions_updated"] == 0
+    kept = api.as_("admin").get(f"/devices/{ids[SOIL_MAC]}").json()
+    assert (kept["latitude"], kept["location_source"]) == (13.3605, "entered")
+    r = api.as_("admin").patch(f"/devices/{ids[SOIL_MAC]}", json={"latitude": 13.1})
+    assert r.status_code == 422 and r.json()["error"]["code"] == "position_incomplete"
+    assert {req.method for req in farmfuture["requests"]} == {"GET"}
+
+
+def test_device_readings_as_shown_in_farmfuture(api, db, farmfuture) -> None:
+    from app.services.integration import farmfuture_view
+    farmfuture_view._CACHE.clear()
+    _link_farms(api, db)
+    code = _register(api, "farmfuture_soil_microclimate")
+    api.as_("admin").post(f"/integrations/sources/{code}/import-devices")
+    ids = {mac: db.scalar(select(Device.id).where(Device.device_code == f"FF-{mac}"))
+           for mac in (SOIL_MAC, CLIME_MAC, ANALOGUE_MAC)}
+
+    soil = api.as_("analyst").get(f"/devices/{ids[SOIL_MAC]}/farmfuture").json()
+    page = soil["sensors_page"]
+    shown = {r["label"]: r["text"] for r in page["rows"]}
+    # the FarmFuture Sensors-page card: its labels, rounding and units
+    assert shown == {"Top Moisture": "21.50%", "Bottom Moisture": "25.00%", "Temperature": "27.7°C", "pH": "6.87",
+                     "EC": "49.00 µS/cm", "Nitrogen": "305 kg/ha", "Phosphorus": "1,230 kg/ha", "Potassium": "278 kg/ha",
+                     "Solar Radiation": "179 W/m²"}
+    assert (page["battery_pct"], page["npk_shown"], page["updated_at"]) == (100, True, "2026-11-09T14:25:37+05:30")
+    assert "lat" not in json.dumps(page)  # the device position is not passed on
+    # Farm Insights: average / lowest / highest of the daily means over the last 7 days, asked with FarmFuture's dates
+    # every soil device of the farm under FarmFuture's picker name; FarmFuture opens on the first one
+    fi = soil["farm_insights"]
+    assert [d["label"] for d in fi["devices"]] == ["Soilsync Hub - 1", "Not imported - 2"]
+    assert fi["farmfuture_opens_on"] == SOIL_MAC
+    insight = {m["label"]: m for m in fi["devices"][0]["metrics"]}
+    assert (insight["Nitrogen"]["average_text"], insight["Nitrogen"]["low_text"], insight["Nitrogen"]["days"]) == ("124", "124", 2)
+    assert (insight["Soil Temperature"]["average_text"], insight["Soil Temperature"]["high_text"]) == ("21.9", "21.9")
+    assert insight["Soil Moisture 1"]["trend"] == "Stable" and "Humidity" not in insight
+    asked = [r.url.params for r in farmfuture["requests"] if r.url.path == "/api/Data/GetFarmStats"][-1]
+    assert (asked["startDate"], asked["endDate"]) == ((today_ist() - timedelta(days=6)).isoformat(), today_ist().isoformat())
+
+    analogue = {r["label"]: r["text"] for r in
+                api.as_("admin").get(f"/devices/{ids[ANALOGUE_MAC]}/farmfuture").json()["sensors_page"]["rows"]}
+    assert (analogue["Rainfall (cumulative)"], analogue["Leaf Wetness"], analogue["Soil temperature"],
+            analogue["Battery Percentage"], analogue["Signal strength"]) == ("12.0 mm", "3160", "-1.0°C", "0.00%", "17 CSQ (0-31)")
+    assert "Air Pressure" not in analogue  # FarmFuture's Analogue card has no pressure
+    clime = api.as_("admin").get(f"/devices/{ids[CLIME_MAC]}/farmfuture").json()
+    assert {r["label"]: r["text"] for r in clime["sensors_page"]["rows"]} == {"Wind Direction": None,
+                                                                             "Battery Percentage": "97.50%"}
+    assert clime["farm_insights"] is None
+
+    # FarmFuture hides N, P and K while the soil is too dry – so does the view
+    farmfuture["npk_hidden"] = True
+    farmfuture_view._CACHE.clear()
+    dry = api.as_("admin").get(f"/devices/{ids[SOIL_MAC]}/farmfuture").json()["sensors_page"]
+    assert dry["npk_shown"] is False and "Nitrogen" not in {r["label"] for r in dry["rows"]}
+    assert dry["note"].startswith("Soil is dry")
+    assert {req.method for req in farmfuture["requests"]} == {"GET"}

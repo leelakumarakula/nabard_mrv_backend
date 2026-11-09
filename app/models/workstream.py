@@ -105,12 +105,20 @@ class Device(Base, EntityBase, DemoMixin):
     status: Mapped[str] = status_col("planned")  # planned | active | faulty | removed
     deployment_justification: Mapped[str | None] = mapped_column(UnicodeText)
     notes: Mapped[str | None] = mapped_column(UnicodeText)
+    # Installed position (precise location – shown only with farmer.read_pii); source: FarmFuture or entered
+    latitude: Mapped[Decimal | None] = mapped_column(Numeric(9, 6))
+    longitude: Mapped[Decimal | None] = mapped_column(Numeric(9, 6))
+    location_source: Mapped[str | None] = mapped_column(Unicode(40))
+    location_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     farm_plot: Mapped[FarmPlot | None] = relationship(lazy="joined")
     geo_unit: Mapped[GeoUnit] = relationship(lazy="joined")
 
     @property
     def label(self) -> str:
+        # FarmFuture devices are coded FF-<MAC ID>; people know them by the MAC ID that FarmFuture shows
+        if self.device_code.startswith("FF-"):
+            return self.device_code[3:]
         return f"{self.device_code} ({self.device_type})"
 
 

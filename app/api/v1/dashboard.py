@@ -121,6 +121,7 @@ def _rainfall_summary(db: Session, current: CurrentUser, programme: Programme) -
     return {"plots": len(latest), "as_of": max(r.attributes.get("as_of_date", "") for r in latest.values()),
             "by_status": by_status,
             "driest": [{"record_id": r.id, "plot_code": r.farm_plot.plot_code if r.farm_plot else None,
+                        "farm_name": r.farm_plot.farm.name if r.farm_plot else None,
                         "ytd_received_pct": r.attributes.get("ytd_received_pct"), "ytd_status": r.attributes.get("ytd_status"),
                         "ytd_difference_mm": r.attributes.get("ytd_difference_mm"),
                         "measured_days": f"{r.attributes.get('ytd_data_days')}/{r.attributes.get('ytd_days')}"}
