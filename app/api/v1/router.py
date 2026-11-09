@@ -9,6 +9,7 @@ from app.api.v1 import (
     dashboard,
     devices,
     evidence,
+    farm_health,
     geography,
     health,
     indicators,
@@ -28,5 +29,5 @@ from app.api.v1 import (
 api_router = APIRouter()
 for module in (health, auth, admin, dashboard, programmes, geography, organisations, registry, workstreams, devices,
                advisories, community, configuration, indicators, monitoring, evidence, mrv, verification, integrations,
-               plot_map, reports, me):
+               plot_map, reports, me, farm_health):
     api_router.include_router(module.router)

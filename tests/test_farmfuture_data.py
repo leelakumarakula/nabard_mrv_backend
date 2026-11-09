@@ -228,6 +228,18 @@ def farmfuture(monkeypatch):
             return ok({"macAddress": params["macAddress"], "stats": {
                 ten: {"rainfall_mm": {"last": 12.5}}, nine: {"rainfall_mm": {"last": 0}},
                 yesterday: {"rainfall_mm": {"last": 99.0}}}})
+        if path == f"/api/Calendar/GetUserCalendarEvents/{FARM_A}":  # the farm calendar (crop stage for the pest screen)
+            return ok({"userCommonCalendarEvents": [{"title": "Berry development", "start": "2024-01-01T00:00:00",
+                                                     "end": "2024-12-31T00:00:00"}], "userCalendarEvents": []})
+        if path == "/api/Data/GetMinMaxMean":  # FarmFuture's Device Statistics screen (N, P, K, pH not corrected)
+            assert params["macAddress"] == SOIL_MAC
+            long_ago = (today_ist() - timedelta(days=20)).isoformat()  # outside the asked week: left out
+            return ok({"startDate": params["startDate"], "endDate": params["endDate"], "macAddress": SOIL_MAC, "stats": {
+                yesterday: {"nitrogen": {"min": 384, "max": 386, "mean": 385}, "pH": {"min": 5.2, "max": 5.3, "mean": 5.26},
+                            "temperature": {"min": 21, "max": 22, "mean": 21.54}},
+                older: {"nitrogen": {"min": 380, "max": 385, "mean": 384}, "pH": {"min": 4.86, "max": 5.39, "mean": 5.1},
+                        "temperature": {"min": 21, "max": 21.5, "mean": 21.4}},
+                long_ago: {"nitrogen": {"min": 1, "max": 999, "mean": 500}}}})
         if path == "/api/Data/GetMinMaxMeanCalibrated":
             series = {"nitrogen": {"min": 350, "max": 370, "mean": 360}, "pH": {"min": 3.2, "max": 3.5, "mean": 3.38}}
             name = params["parameter"]
@@ -511,8 +523,30 @@ def test_scouting_satellite_and_advisories(api, db, farmfuture) -> None:
 
     scouting = _register(api, "farmfuture_pest_scouting")
     run = api.as_("admin").post(f"/integrations/{scouting}/pull").json()["sync_run"]
-    assert (run["records_accepted"], run["records_rejected"]) == (2, 0), run  # the trap record is not an inspection
-    found = {r.attributes["pest_or_disease"]: r for r in _records(db, scouting)}
+    assert run["records_rejected"] == 0, run
+    pulled = _records(db, scouting)
+    found = {r.attributes["pest_or_disease"]: r for r in pulled if r.record_type == "pest_inspection"}
+    assert len(found) == 2  # the trap record is not an inspection
+    # FarmFuture's Farm Health pest & disease screen, run on the farm's forecast, station, calendar and scouting
+    risk = {r.attributes["pest_or_disease"]: r for r in pulled
+            if r.record_type == "pest_risk_estimate" and r.farm_plot_id == plot.id}
+    shot = risk["shot_hole_borer"]  # 2 of 25 plants with signs yesterday
+    assert (shot.attributes["risk_level"], shot.attributes["screening_status"], shot.attributes["inspect_now"]) == (
+        "very_high", "Signs found", True)
+    assert shot.data_nature == "model_prediction" and shot.validation_status == "valid"
+    assert shot.attributes["model_name"] == "FarmFuture Farm Health pest & disease screen (coffee-screen-2026-09-v2)"
+    assert shot.attributes["why"].startswith("Inspection: 2 of 25 plants had signs found on")
+    assert (shot.attributes["valid_from"], shot.attributes["next_check_by"]) == (
+        today_ist().isoformat(), (today_ist() + timedelta(days=1)).isoformat())
+    berry = risk["coffee_berry_borer"]  # the farm calendar puts the crop in berry development
+    assert (berry.attributes["risk_level"], berry.attributes["screening_status"]) == ("low", "Estimated berry-stage watch")
+    wsb = risk["white_stem_borer"]  # an Arabica farm in a white-stem-borer flight month (or not), by the calendar
+    flight = today_ist().month in (3, 4, 5, 9, 10, 11, 12)
+    assert (wsb.attributes["risk_level"], wsb.attributes["on_seasonal_watch_list"]) == (
+        "high" if flight else "low", flight)
+    assert "12.0014" not in json.dumps([r.attributes for r in risk.values()])  # scouting GPS points are not passed on
+    asked = {r.url.path for r in farmfuture["requests"]}
+    assert {"/WeatherForecast/forecast", f"/api/Calendar/GetUserCalendarEvents/{FARM_A}"} <= asked
     shot = found["shot_hole_borer"]
     assert shot.record_type == "pest_inspection" and shot.farm_plot_id == plot.id and float(shot.value) == 8.0
     assert found["other"].attributes["pest_other_name"] == "Thrips"
@@ -626,8 +660,20 @@ def test_device_readings_as_shown_in_farmfuture(api, db, farmfuture) -> None:
     assert insight["Soil Moisture 1"]["trend"] == "Stable" and "Humidity" not in insight
     asked = [r.url.params for r in farmfuture["requests"] if r.url.path == "/api/Data/GetFarmStats"][-1]
     assert (asked["startDate"], asked["endDate"]) == ((today_ist() - timedelta(days=6)).isoformat(), today_ist().isoformat())
+    # Device Statistics (Weekly): lowest daily min, highest daily max, mean of the daily means, last day's mean – 2 decimals
+    ds = soil["device_statistics"]
+    stat = {m["label"]: m for m in ds["metrics"]}
+    assert [stat["Nitrogen"][f"{k}_text"] for k in ("minimum", "maximum", "average", "latest")] == \
+        ["380.00", "386.00", "384.50", "385.00"]
+    assert [stat["pH"][f"{k}_text"] for k in ("minimum", "maximum", "average", "latest")] == ["4.86", "5.39", "5.18", "5.26"]
+    assert (stat["Temperature"]["unit"], stat["Temperature"]["average_text"], stat["Nitrogen"]["days"]) == ("°C", "21.47", 2)
+    # a reading missing on a day counts as 0, as on FarmFuture's screen
+    assert (stat["Phosphorus"]["minimum"], stat["Phosphorus"]["latest"]) == (0, 0)
+    asked = [r.url.params for r in farmfuture["requests"] if r.url.path == "/api/Data/GetMinMaxMean"][-1]
+    assert (asked["endDate"], asked["macAddress"]) == (today_ist().isoformat(), SOIL_MAC)
+    assert asked["startDate"] >= (today_ist() - timedelta(days=6)).isoformat()
 
-    analogue = {r["label"]: r["text"] for r in
+    analogue ={r["label"]: r["text"] for r in
                 api.as_("admin").get(f"/devices/{ids[ANALOGUE_MAC]}/farmfuture").json()["sensors_page"]["rows"]}
     assert (analogue["Rainfall (cumulative)"], analogue["Leaf Wetness"], analogue["Soil temperature"],
             analogue["Battery Percentage"], analogue["Signal strength"]) == ("12.0 mm", "3160", "-1.0°C", "0.00%", "17 CSQ (0-31)")

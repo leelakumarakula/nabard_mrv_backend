@@ -9,6 +9,10 @@ API and worked out its own way:
   Farm Insights (soil cards)   GET /api/Data/GetFarmStats?farmId=&startDate=&endDate=   last 7 days (today − 6 … today):
                                Average = mean of the device's daily means, Low / High = lowest / highest daily mean,
                                trend = last day against first day (±2 %)
+  Device Statistics (device    GET /api/Data/GetMinMaxMean?startDate=&endDate=&macAddress=   Weekly = today − 6 … today:
+  card → statistics)           Minimum / Maximum = lowest daily min / highest daily max, Average = mean of the daily
+                               means, Latest = last day's mean. Its N, P, K and pH are NOT corrected, so they differ
+                               from Farm Insights; temperature, EC and moisture agree with it.
 
 The Sensors page reading is FarmFuture's latest reading before its server-side correction (the corrected reading is
 GetAllSensorsLatestDataV2 – FarmFuture's own code says so); the platform's MRV records keep the corrected daily values
@@ -61,6 +65,12 @@ INSIGHTS = [("pH", "pH", ""), ("nitrogen", "Nitrogen", "kg/ha"), ("phosphorous",
             ("potassium", "Potassium", "kg/ha"), ("soil_moisture_percentage_L1", "Soil Moisture 1", "%"),
             ("soil_moisture_percentage_L2", "Soil Moisture 2", "%"), ("temperature", "Soil Temperature", "deg C"),
             ("ec", "EC", "uS/cm")]
+# Device Statistics (the device's own statistics screen), in FarmFuture's order: (section, GetMinMaxMean key, label, unit)
+DEVICE_STATS = [("Soil", "temperature", "Temperature", "°C"), ("Soil", "ec", "EC", "µS/cm"), ("Soil", "pH", "pH", ""),
+                ("Soil", "soil_moisture_percentage_L1", "Top Moisture", "%"),
+                ("Soil", "soil_moisture_percentage_L2", "Bottom Moisture", "%"),
+                ("Nutrients", "nitrogen", "Nitrogen", "kg/ha"), ("Nutrients", "phosphorous", "Phosphorus", "kg/ha"),
+                ("Nutrients", "potassium", "Potassium", "kg/ha")]
 
 
 def _number(value: Any) -> float | None:
@@ -117,7 +127,8 @@ def _farm_id(db: Session, device: Device) -> str:
     return farm_id
 
 
-def _get(api: FarmFutureApi, client, path: str, params: dict[str, Any] | None = None) -> Any:
+def _get(api: FarmFutureApi, client, path: str, params: dict[str, Any] | None = None,
+         seconds: int = CACHE_SECONDS) -> Any:
     key = (path, *sorted(f"{k}={v}" for k, v in (params or {}).items()))
     cached = _CACHE.get(key)
     now = datetime.now(IST)
@@ -132,7 +143,7 @@ def _get(api: FarmFutureApi, client, path: str, params: dict[str, Any] | None = 
         body = response.json()
         data = (body.get("data") if body.get("succeeded") else None) if isinstance(body, dict) and "succeeded" in body \
             else body
-    _CACHE[key] = (now + timedelta(seconds=CACHE_SECONDS), data)
+    _CACHE[key] = (now + timedelta(seconds=seconds), data)
     return data
 
 
@@ -218,6 +229,30 @@ def _insights(device: dict[str, Any]) -> list[dict[str, Any]]:
     return out
 
 
+def _device_statistics(data: Any, start: str, end: str) -> list[dict[str, Any]]:
+    """The device's Device Statistics panel, worked out the way FarmFuture's device-statistics screen does: each day of
+    the range (start … end) gives min / max / mean; Minimum = lowest daily min, Maximum = highest daily max, Average =
+    mean of the daily means, Latest = the last day's mean. Like FarmFuture, a reading missing on a day counts as 0."""
+    stats = (data.get("data") or data.get("stats") or {}) if isinstance(data, dict) else {}
+    days = sorted((day, values) for day, values in stats.items()
+                  if isinstance(values, dict) and start <= str(day)[:10] <= end)
+    out = []
+    for section, key, label, unit in DEVICE_STATS:
+        mins, maxs, means = [], [], []
+        for _, values in days:
+            stat = values.get(key) if isinstance(values.get(key), dict) else {}
+            mean = stat.get("mean") if stat.get("mean") is not None else stat.get("avg")
+            for target, value in ((mins, stat.get("min")), (maxs, stat.get("max")), (means, mean)):
+                target.append(_number(value) if _number(value) is not None else 0.0)
+        if not means:
+            continue
+        numbers = {"minimum": min(mins), "maximum": max(maxs), "average": sum(means) / len(means), "latest": means[-1]}
+        # each figure is printed with exactly 2 decimals (Angular number:'1.2-2'), the unit beside it
+        out.append({"section": section, "label": label, "unit": unit, **numbers,
+                    **{f"{name}_text": _text(value, F2, "") for name, value in numbers.items()}, "days": len(means)})
+    return out
+
+
 def farmfuture_view(db: Session, device: Device) -> dict[str, Any]:
     farm_id = _farm_id(db, device)
     mac = device.device_code[3:]
@@ -226,7 +261,7 @@ def farmfuture_view(db: Session, device: Device) -> dict[str, Any]:
     api._init_api()
     today = today_ist()
     start = today - timedelta(days=6)
-    sensors_page = insights = None
+    sensors_page = insights = device_stats = None
     with api.client() as client:
         if device.device_type == "soilsync_7in1":
             item = _item(_get(api, client, f"/api/Data/GetAllSensorsLatestData/{farm_id}"), mac)
@@ -240,6 +275,13 @@ def farmfuture_view(db: Session, device: Device) -> dict[str, Any]:
             insights = {"from": start.isoformat(), "to": today.isoformat(), "devices": devices,
                         "farmfuture_opens_on": devices[0]["mac_id"] if devices else None,
                         "api": "GET /api/Data/GetFarmStats?farmId=&startDate=&endDate="}
+            # Device Statistics, Weekly: today − 6 … today, not before the device was installed
+            ds_start = max(start, device.installed_on) if device.installed_on and device.installed_on <= today else start
+            minmax = _get(api, client, "/api/Data/GetMinMaxMean",
+                          {"startDate": ds_start.isoformat(), "endDate": today.isoformat(), "macAddress": mac})
+            device_stats = {"from": ds_start.isoformat(), "to": today.isoformat(),
+                            "metrics": _device_statistics(minmax, ds_start.isoformat(), today.isoformat()),
+                            "api": "GET /api/Data/GetMinMaxMean?startDate=&endDate=&macAddress="}
         elif device.device_type in ("microclime", "analogue_weather"):
             analogue = device.device_type == "analogue_weather"
             path = "/api/Data/GetAllAnalogueWeatherData" if analogue else "/api/Data/GetAllWeatherData"
@@ -249,5 +291,5 @@ def farmfuture_view(db: Session, device: Device) -> dict[str, Any]:
                                 "api": f"GET {path}?farmId="}
         else:
             raise AppError(422, "not_supported", f"FarmFuture shows no readings for a {device.device_type} device here")
-    return {"mac_id": mac, "sensors_page": sensors_page, "farm_insights": insights,
+    return {"mac_id": mac, "sensors_page": sensors_page, "farm_insights": insights, "device_statistics": device_stats,
             "fetched_at": datetime.now(IST).isoformat()}

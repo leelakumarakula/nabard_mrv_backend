@@ -19,6 +19,7 @@ Only HTTP GET is ever sent to the FarmFuture API (through ``FarmFutureApi._reque
   GET /api/wsb/sources?farm=                              which satellite scene the summary used
   GET /api/Advisory/{farm_id}/latest | /history | ?date=  the FarmFuture advisory engine's farm advisories
   GET /WeatherForecast/forecast?lat=&lon=                 5-day, 3-hourly weather forecast for a farm location
+  GET /api/Calendar/GetUserCalendarEvents/{farm_id}       the farm's crop calendar (crop stage for the pest screen)
 
 Farms are the FarmFuture farms already linked to platform plots by a reviewed identity map (entity farm_plot) on any
 FarmFuture source – normally created by "Import farms from FarmFuture" on the Water Balance Engine source. The adapters
@@ -40,6 +41,7 @@ from app.core.errors import AppError
 from app.models import Device, Farm, Farmer, FarmPlot, GeoUnit, IntegrationSource, SourceRecordMap
 from app.services import audit, crud
 from app.services.device_location import parse_position
+from app.services.integration import coffee_pest_screen
 from app.services.integration.base import PageResult, TransientSourceError
 from app.services.integration.farmfuture import FarmFutureApi
 from app.services.integration.platform_adapters import IST, PlatformAdapter, _int, _noon, today_ist
@@ -686,6 +688,10 @@ SCOUTING_TOPICS = {"shothole": "shot_hole_borer", "wsb": "white_stem_borer", "st
                    "coffee_phoma": "phoma", "leafminer": "leaf_miner", "coffee_leaf_miner": "leaf_miner"}
 
 
+# FarmFuture screen priority → platform risk level: 1 routine inspection, 2 inspect now (trigger), 3 signs found
+PEST_RISK_LEVELS = {1: "low", 2: "high", 3: "very_high"}
+
+
 def scouting_pest(topic: Any) -> tuple[str, str | None]:
     """FarmFuture scouting topic → (platform pest code, original name when it is 'other')."""
     key = str(topic or "").strip().lower().replace(" ", "_").replace("-", "_")
@@ -699,13 +705,16 @@ class FarmFuturePestScoutingAdapter(FarmFutureFarmAdapter):
         "default_source_code": "farmfuture_pest_scouting", "owner": OWNER,
         "description": "Field scouting recorded in the FarmFuture app on the linked farms – pest or disease, plants "
                        "inspected and plants with signs – as scouting / inspection records (incidence is calculated). "
-                       "Phone numbers, notes, photos and GPS points of the scouting are not imported.",
-        "config": {"schedule_daily_at": "06:50", "past_days": 365}}
+                       "Phone numbers, notes, photos and GPS points of the scouting are not imported. 'risk_screen' "
+                       "also runs FarmFuture's Farm Health pest & disease screen (coffee-screen-2026-09-v2) on the farm's "
+                       "FarmFuture forecast, weather station, farm calendar and scouting, giving one risk estimate per "
+                       "pest or disease per day – the same 'inspect now' signals FarmFuture's Farm Health shows.",
+        "config": {"schedule_daily_at": "06:50", "past_days": 365, "risk_screen": True}}
 
     def farm_records(self, client: httpx.Client, link: FarmLink) -> list[dict[str, Any]]:
         body = self.get_data(client, "/api/wsb/records", {"farm": link.farm_id}) or {}
         since = today_ist() - timedelta(days=_int(self.config, "past_days", 365, 1, 3650))
-        records = []
+        records = self._risk_screen(client, link, body) if self.config.get("risk_screen", True) else []
         for item in (body.get("records") or []) if isinstance(body, dict) else []:
             day = _day(item.get("date"))
             if item.get("kind") != "inspection" or not item.get("id") or day is None or day < since:
@@ -715,6 +724,46 @@ class FarmFuturePestScoutingAdapter(FarmFutureFarmAdapter):
                 "pest_or_disease": pest, "pest_other_name": other_name, "plants_inspected": item.get("inspected"),
                 "plants_affected": item.get("affected"),
                 "scouting_method": "FarmFuture app scouting (recorded on the farm)"}, _noon(day)))
+        return records
+
+    def _risk_screen(self, client: httpx.Client, link: FarmLink, scouting: Any) -> list[dict[str, Any]]:
+        """FarmFuture's Farm Health pest & disease screen for the farm, today: one estimate per pest or disease. A topic
+        FarmFuture cannot judge (no fresh forecast, host not recorded) gets no estimate rather than a guessed one."""
+        now = datetime.now(IST)
+        today = now.date()
+        # FarmFuture judges the host by the crops the farm's devices are registered for; the plot's crop is the fallback.
+        # A farm registered only for other crops (tea, mango) gets no coffee screen, as FarmFuture hides it there.
+        crops = coffee_pest_screen.registered_crops(
+            self.get_data(client, f"/api/Data/GetAllSensorsLatestDataV2/{link.farm_id}"))
+        if crops and not any("coffee" in c.lower() for c in crops):
+            return []
+        species = ", ".join(c for c in crops if "coffee" in c.lower()) or link.plot.crop
+        located = link.plot.latitude is not None and link.plot.longitude is not None
+        forecast = self.get_data(client, "/WeatherForecast/forecast", {
+            "lat": float(link.plot.latitude), "lon": float(link.plot.longitude)}) if located else None
+        stations = self.get_data(client, "/api/Data/GetAllWeatherData", {"farmId": link.farm_id})
+        calendar = self.get_data(client, f"/api/Calendar/GetUserCalendarEvents/{link.farm_id}")
+        results = coffee_pest_screen.screen_farm(
+            forecast=forecast, stations=stations, calendar=calendar,
+            records=(scouting.get("records") or []) if isinstance(scouting, dict) else [],
+            species=species, now=now)
+        records = []
+        for r in results:
+            if r["priority"] == 0:
+                continue
+            pest, title = coffee_pest_screen.TOPICS[r["topic"]]
+            records.append(self.observation(
+                f"FF-PESTRISK-{link.plot.plot_code}-{r['topic']}-{today}", "pest_risk_estimate", link.plot, {
+                    "pest_or_disease": pest, "risk_level": PEST_RISK_LEVELS[r["priority"]],
+                    "valid_from": today.isoformat(), "valid_to": (today + timedelta(days=2)).isoformat(),
+                    "model_name": coffee_pest_screen.MODEL_NAME, "screening_topic": title,
+                    "screening_status": r["status"], "inspect_now": r["priority"] >= 2,
+                    "why": "; ".join(r["factors"])[:4000] or None, "what_to_check": r["what_to_check"],
+                    "next_check_by": r.get("overdue_check") or (
+                        today + timedelta(days=1 if r["priority"] >= 2 else r["follow_days"])).isoformat(),
+                    "missing_evidence": "; ".join(r["gaps"])[:4000] or None,
+                    "on_seasonal_watch_list": r["on_watch_list"], "reference": r["source"]},
+                now.isoformat()))
         return records
 
 
