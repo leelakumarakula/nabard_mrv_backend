@@ -221,7 +221,7 @@ def farmfuture(monkeypatch):
                         "category": "Established blocks", "startDate": "2025-11-01T00:00:00Z", "endDate": "2025-11-30T00:00:00Z"},
                        {"id": "t2", "description": "Take up lime washing on young dadap stems.", "category": "Established blocks"},
                        {"id": "t3", "description": "Take up clean weeding in Robusta blocks.", "category": "Established blocks"}])
-        if path == "/api/Data/GetWeatherStats" and params["parameter"] == "rainfall_mm":
+        if path == "/api/Data/GetWeatherStats" and params.get("parameter") == "rainfall_mm":
             state["weather_stats_params"] = dict(params)
             ten, nine = (today_ist() - timedelta(days=10)).isoformat(), (today_ist() - timedelta(days=9)).isoformat()
             # day -8 is missing (station did not report); yesterday lies inside the recent window and is ignored here
@@ -689,4 +689,41 @@ def test_device_readings_as_shown_in_farmfuture(api, db, farmfuture) -> None:
     dry = api.as_("admin").get(f"/devices/{ids[SOIL_MAC]}/farmfuture").json()["sensors_page"]
     assert dry["npk_shown"] is False and "Nitrogen" not in {r["label"] for r in dry["rows"]}
     assert dry["note"].startswith("Soil is dry")
+    assert {req.method for req in farmfuture["requests"]} == {"GET"}
+
+
+def test_farm_health_views_pass_farmfuture_through_without_locations(api, db, farmfuture) -> None:
+    """The Climate Resilience workstream pages read FarmFuture live through /farm-health (GET only, nothing stored): exact
+    locations only for users who may see them, scouting without notes or recorder, the profile without its outline."""
+    from app.services.integration import farmfuture_view
+    farmfuture_view._CACHE.clear()
+    plot = _link_farms(api, db)
+    farms = api.as_("analyst").get("/farm-health/farms").json()
+    assert str(plot.id) in {f["plot_id"] for f in farms}
+    base = f"/farm-health/{plot.id}"
+
+    # the pest map's sources hold the farm outline and positions: only with farmer.read_pii
+    assert api.as_("analyst").get(f"{base}/sources").status_code == 403
+    src = api.as_("admin").get(f"{base}/sources").json()
+    assert src["farm_id"] == FARM_A and {r["topic"] for r in src["records"]} >= {"shothole"}
+    assert "Checked" not in json.dumps(src["records"]) and "+91" not in json.dumps(src["records"])  # no notes or recorder
+    assert api.as_("admin").get(f"{base}/forecast", params={"lat": 1.0, "lon": 1.0}).status_code == 422  # only at the farm
+
+    climate = api.as_("analyst").get(f"{base}/climate").json()
+    assert {s["macId"] for s in climate["stations"]} == {CLIME_MAC, ANALOGUE_MAC}
+    assert "12.0011" not in json.dumps(climate) and "13.36" not in json.dumps(climate)  # no station or farm position
+    assert climate["climate"]["annual_rainfall"]["mean_mm"] == 780.0 and climate["forecast"]["list"]
+
+    profile = api.as_("analyst").get(f"{base}/profile").json()
+    assert "center" not in profile["profile"] and profile["profile"]["summary"]
+    assert profile["eudr"]["screening"]["complianceFlag"] == "Compliant (risk-based)"
+    assert profile["satellite"]["zones"][0]["cells"] == 136
+
+    assert api.as_("analyst").get(f"{base}/insights", params={"start": "2026-11-09", "end": "2026-11-01"}).status_code == 422
+    week = api.as_("analyst").get(f"{base}/insights").json()
+    assert (week["start"], week["end"]) == ((today_ist() - timedelta(days=6)).isoformat(), today_ist().isoformat())
+    assert [d["deviceName"] for d in week["sensor_devices"]][0] == "Soilsync Hub"
+
+    plan = api.as_("analyst").get(f"{base}/irrigation").json()
+    assert plan["plan"] == {"farm": {"area_ha": 2.0}}
     assert {req.method for req in farmfuture["requests"]} == {"GET"}
